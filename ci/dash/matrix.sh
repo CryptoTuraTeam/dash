@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright (c) 2019-2024 The Dash Core developers
+# Copyright (c) 2019-2025 The Dash Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 #
@@ -22,8 +22,6 @@ elif [ "$BUILD_TARGET" = "linux64" ]; then
   source ./ci/test/00_setup_env_native_qt5.sh
 elif [ "$BUILD_TARGET" = "linux64_asan" ]; then
   source ./ci/test/00_setup_env_native_asan.sh
-elif [ "$BUILD_TARGET" = "linux64_cxx20" ]; then
-  source ./ci/test/00_setup_env_native_cxx20.sh
 elif [ "$BUILD_TARGET" = "linux64_fuzz" ]; then
   source ./ci/test/00_setup_env_native_fuzz.sh
 elif [ "$BUILD_TARGET" = "linux64_multiprocess" ]; then

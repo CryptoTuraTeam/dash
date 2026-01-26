@@ -1,5 +1,5 @@
 // Copyright (c) 2016 BitPay Inc.
-// Copyright (c) 2024 The Dash Core developers
+// Copyright (c) 2024-2025 The Dash Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -22,12 +22,12 @@ class uint256;
 
 enum class AddressType : uint8_t;
 
-extern RecursiveMutex cs_main;
+extern RecursiveMutex cs_main; // NOLINT(readability-redundant-declaration)
 
 //! throws JSONRPCError if address index is unavailable
 bool GetAddressIndex(CBlockTreeDB& block_tree_db, const uint160& addressHash, const AddressType type,
                      std::vector<CAddressIndexEntry>& addressIndex,
-                     const int32_t start = 0, const int32_t end = 0)
+                     const int32_t start, const int32_t end)
     EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 //! throws JSONRPCError if address index is unavailable
 bool GetAddressUnspentIndex(CBlockTreeDB& block_tree_db, const uint160& addressHash, const AddressType type,

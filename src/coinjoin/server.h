@@ -7,10 +7,11 @@
 
 #include <coinjoin/coinjoin.h>
 
+#include <net_processing.h>
+#include <net_types.h>
 #include <protocol.h>
 
 class CActiveMasternodeManager;
-class CCoinJoinServer;
 class CConnman;
 class CDataStream;
 class CDeterministicMNManager;
@@ -19,13 +20,12 @@ class ChainstateManager;
 class CMasternodeMetaMan;
 class CNode;
 class CTxMemPool;
-class PeerManager;
 
 class UniValue;
 
 /** Used to keep track of current status of mixing pool
  */
-class CCoinJoinServer : public CCoinJoinBaseSession, public CCoinJoinBaseManager
+class CCoinJoinServer : public CCoinJoinBaseSession, public CCoinJoinBaseManager, public NetHandler
 {
 private:
     ChainstateManager& m_chainman;
@@ -34,10 +34,9 @@ private:
     CDSTXManager& m_dstxman;
     CMasternodeMetaMan& m_mn_metaman;
     CTxMemPool& mempool;
-    const CActiveMasternodeManager* const m_mn_activeman;
+    const CActiveMasternodeManager& m_mn_activeman;
     const CMasternodeSync& m_mn_sync;
     const llmq::CInstantSendManager& m_isman;
-    std::unique_ptr<PeerManager>& m_peerman;
 
     // Mixing uses collateral transactions to trust parties entering the pool
     // to behave honestly. If they don't it takes their money.
@@ -85,38 +84,30 @@ private:
     void RelayCompletedTransaction(PoolMessage nMessageID) EXCLUSIVE_LOCKS_REQUIRED(!cs_coinjoin);
 
     void ProcessDSACCEPT(CNode& peer, CDataStream& vRecv) EXCLUSIVE_LOCKS_REQUIRED(!cs_vecqueue);
-    PeerMsgRet ProcessDSQUEUE(const CNode& peer, CDataStream& vRecv) EXCLUSIVE_LOCKS_REQUIRED(!cs_vecqueue);
+    void ProcessDSQUEUE(NodeId from, CDataStream& vRecv) EXCLUSIVE_LOCKS_REQUIRED(!cs_vecqueue);
     void ProcessDSVIN(CNode& peer, CDataStream& vRecv) EXCLUSIVE_LOCKS_REQUIRED(!cs_coinjoin);
     void ProcessDSSIGNFINALTX(CDataStream& vRecv) EXCLUSIVE_LOCKS_REQUIRED(!cs_coinjoin);
 
     void SetNull() override EXCLUSIVE_LOCKS_REQUIRED(cs_coinjoin);
 
 public:
-    explicit CCoinJoinServer(ChainstateManager& chainman, CConnman& _connman, CDeterministicMNManager& dmnman,
-                             CDSTXManager& dstxman, CMasternodeMetaMan& mn_metaman, CTxMemPool& mempool,
-                             const CActiveMasternodeManager* const mn_activeman, const CMasternodeSync& mn_sync,
-                             const llmq::CInstantSendManager& isman, std::unique_ptr<PeerManager>& peerman) :
-        m_chainman(chainman),
-        connman(_connman),
-        m_dmnman(dmnman),
-        m_dstxman(dstxman),
-        m_mn_metaman(mn_metaman),
-        mempool(mempool),
-        m_mn_activeman(mn_activeman),
-        m_mn_sync(mn_sync),
-        m_isman{isman},
-        m_peerman(peerman),
-        vecSessionCollaterals(),
-        fUnitTest(false)
-    {}
+    CCoinJoinServer() = delete;
+    CCoinJoinServer(const CCoinJoinServer&) = delete;
+    CCoinJoinServer& operator=(const CCoinJoinServer&) = delete;
+    explicit CCoinJoinServer(PeerManagerInternal* peer_manager, ChainstateManager& chainman, CConnman& _connman,
+                             CDeterministicMNManager& dmnman, CDSTXManager& dstxman, CMasternodeMetaMan& mn_metaman,
+                             CTxMemPool& mempool, const CActiveMasternodeManager& mn_activeman,
+                             const CMasternodeSync& mn_sync, const llmq::CInstantSendManager& isman);
+    ~CCoinJoinServer();
 
-    PeerMsgRet ProcessMessage(CNode& pfrom, std::string_view msg_type, CDataStream& vRecv);
+    void ProcessMessage(CNode& pfrom, const std::string& msg_type, CDataStream& vRecv) override;
+    bool ProcessGetData(CNode& pfrom, const CInv& inv, CConnman& connman, const CNetMsgMaker& msgMaker) override;
+    bool AlreadyHave(const CInv& inv) override;
+    void Schedule(CScheduler& scheduler) override;
 
     bool HasTimedOut() const;
     void CheckTimeout();
     void CheckForCompleteQueue();
-
-    void DoMaintenance();
 
     void GetJsonInfo(UniValue& obj) const;
 };

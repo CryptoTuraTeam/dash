@@ -22,7 +22,10 @@ import sys
 import collections
 from pathlib import Path
 
-from .authproxy import JSONRPCException
+from .authproxy import (
+    JSONRPCException,
+    serialization_fallback,
+)
 from .descriptors import descsum_create
 from .messages import NODE_P2P_V2
 from .p2p import P2P_SERVICES, P2P_SUBVERSION
@@ -37,7 +40,6 @@ from .util import (
     wait_until_helper,
     p2p_port,
     get_chain_folder,
-    EncodeDecimal,
 )
 
 BITCOIND_PROC_WAIT_TIMEOUT = 60
@@ -106,12 +108,14 @@ class TestNode():
             "-debug",
             "-debugexclude=libevent",
             "-debugexclude=leveldb",
+            "-debugexclude=rand",
             "-uacomment=testnode%d" % i,  # required for subversion uniqueness across peers
         ]
         if self.mocktime != 0:
             self.args.append(f"-mocktime={mocktime}")
 
-        if use_valgrind:
+        # Use valgrind, expect for previous release binaries
+        if use_valgrind and version is None:
             default_suppressions_file = os.path.join(
                 os.path.dirname(os.path.realpath(__file__)),
                 "..", "..", "..", "contrib", "valgrind.supp")
@@ -422,6 +426,21 @@ class TestNode():
 
     def wait_until_stopped(self, timeout=BITCOIND_PROC_WAIT_TIMEOUT):
         wait_until_helper(self.is_node_stopped, timeout=timeout, timeout_factor=self.timeout_factor)
+
+    def replace_in_config(self, replacements):
+        """
+        Perform replacements in the configuration file.
+        The substitutions are passed as a list of search-replace-tuples, e.g.
+            [("old", "new"), ("foo", "bar"), ...]
+        """
+        with open(self.bitcoinconf, 'r', encoding='utf8') as conf:
+            conf_data = conf.read()
+        for replacement in replacements:
+            assert_equal(len(replacement), 2)
+            old, new = replacement[0], replacement[1]
+            conf_data = conf_data.replace(old, new)
+        with open(self.bitcoinconf, 'w', encoding='utf8') as conf:
+            conf.write(conf_data)
 
     @property
     def chain_path(self) -> Path:
@@ -809,7 +828,7 @@ def arg_to_cli(arg):
     elif arg is None:
         return 'null'
     elif isinstance(arg, dict) or isinstance(arg, list):
-        return json.dumps(arg, default=EncodeDecimal)
+        return json.dumps(arg, default=serialization_fallback)
     else:
         return str(arg)
 
@@ -853,7 +872,7 @@ class TestNodeCLI():
             p_args += [clicommand]
         p_args += pos_args + named_args
         self.log.debug("Running dash-cli {}".format(p_args[2:]))
-        process = subprocess.Popen(p_args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+        process = subprocess.Popen(p_args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         cli_stdout, cli_stderr = process.communicate(input=self.input)
         returncode = process.poll()
         if returncode:
@@ -877,12 +896,12 @@ class RPCOverloadWrapper():
     def __getattr__(self, name):
         return getattr(self.rpc, name)
 
-    def createwallet(self, wallet_name, disable_private_keys=None, blank=None, passphrase='', avoid_reuse=None, descriptors=None, load_on_startup=None):
+    def createwallet(self, wallet_name, disable_private_keys=None, blank=None, passphrase='', avoid_reuse=None, descriptors=None, load_on_startup=None, external_signer=None):
         if descriptors is None:
             descriptors = self.descriptors
         if descriptors is not None and load_on_startup is None:
             load_on_startup = False
-        return self.__getattr__('createwallet')(wallet_name, disable_private_keys, blank, passphrase, avoid_reuse, descriptors, load_on_startup)
+        return self.__getattr__('createwallet')(wallet_name, disable_private_keys, blank, passphrase, avoid_reuse, descriptors, load_on_startup, external_signer)
 
     def importprivkey(self, privkey, label=None, rescan=None):
         wallet_info = self.getwalletinfo()
@@ -936,7 +955,7 @@ class RPCOverloadWrapper():
             int(address ,16)
             is_hex = True
             desc = descsum_create('raw(' + address + ')')
-        except:
+        except Exception:
             desc = descsum_create('addr(' + address + ')')
         reqs = [{
             'desc': desc,

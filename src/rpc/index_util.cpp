@@ -1,5 +1,5 @@
 // Copyright (c) 2016 BitPay Inc.
-// Copyright (c) 2024 The Dash Core developers
+// Copyright (c) 2024-2025 The Dash Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -14,7 +14,7 @@
 
 static void EnsureAddressIndexAvailable()
 {
-    if (!fAddressIndex) {
+    if (!node::fAddressIndex) {
         throw JSONRPCError(RPC_INVALID_REQUEST, "Address index is disabled. You should run Dash Core with -addressindex (requires reindex)");
     }
 }
@@ -26,11 +26,7 @@ bool GetAddressIndex(CBlockTreeDB& block_tree_db, const uint160& addressHash, co
     AssertLockHeld(::cs_main);
     EnsureAddressIndexAvailable();
 
-    if (!block_tree_db.ReadAddressIndex(addressHash, type, addressIndex, start, end)) {
-        return error("Unable to get txids for address");
-    }
-
-    return true;
+    return block_tree_db.ReadAddressIndex(addressHash, type, addressIndex, start, end);
 }
 
 bool GetAddressUnspentIndex(CBlockTreeDB& block_tree_db, const uint160& addressHash, const AddressType type,
@@ -40,7 +36,7 @@ bool GetAddressUnspentIndex(CBlockTreeDB& block_tree_db, const uint160& addressH
     EnsureAddressIndexAvailable();
 
     if (!block_tree_db.ReadAddressUnspentIndex(addressHash, type, unspentOutputs))
-        return error("Unable to get txids for address");
+        return false;
 
     if (height_sort) {
         std::sort(unspentOutputs.begin(), unspentOutputs.end(),
@@ -60,7 +56,7 @@ bool GetMempoolAddressDeltaIndex(const CTxMemPool& mempool,
     EnsureAddressIndexAvailable();
 
     if (!mempool.getAddressIndex(addressDeltaIndex, addressDeltaEntries))
-        return error("Unable to get address delta information");
+        return false;
 
     if (timestamp_sort) {
         std::sort(addressDeltaEntries.begin(), addressDeltaEntries.end(),
@@ -77,17 +73,14 @@ bool GetSpentIndex(CBlockTreeDB& block_tree_db, const CTxMemPool& mempool, const
 {
     AssertLockHeld(::cs_main);
 
-    if (!fSpentIndex) {
+    if (!node::fSpentIndex) {
         throw JSONRPCError(RPC_INVALID_REQUEST, "Spent index is disabled. You should run Dash Core with -spentindex (requires reindex)");
     }
 
     if (mempool.getSpentIndex(key, value))
         return true;
 
-    if (!block_tree_db.ReadSpentIndex(key, value))
-        return error("Unable to get spend information");
-
-    return true;
+    return block_tree_db.ReadSpentIndex(key, value);
 }
 
 bool GetTimestampIndex(CBlockTreeDB& block_tree_db, const uint32_t high, const uint32_t low,
@@ -95,12 +88,9 @@ bool GetTimestampIndex(CBlockTreeDB& block_tree_db, const uint32_t high, const u
 {
     AssertLockHeld(::cs_main);
 
-    if (!fTimestampIndex) {
+    if (!node::fTimestampIndex) {
         throw JSONRPCError(RPC_INVALID_REQUEST, "Timestamp index is disabled. You should run Dash Core with -timestampindex (requires reindex)");
     }
 
-    if (!block_tree_db.ReadTimestampIndex(high, low, hashes))
-        return error("Unable to get hashes for timestamps");
-
-    return true;
+    return block_tree_db.ReadTimestampIndex(high, low, hashes);
 }

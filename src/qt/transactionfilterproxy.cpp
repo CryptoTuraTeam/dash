@@ -1,4 +1,4 @@
-// Copyright (c) 2011-2014 The Bitcoin Core developers
+// Copyright (c) 2011-2021 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -11,14 +11,10 @@
 #include <cstdlib>
 #include <optional>
 
-TransactionFilterProxy::TransactionFilterProxy(QObject *parent) :
-    QSortFilterProxyModel(parent),
-    m_search_string(),
-    typeFilter(COMMON_TYPES),
-    watchOnlyFilter(WatchOnlyFilter_All),
-    minAmount(0),
-    limitRows(-1),
-    showInactive(true)
+TransactionFilterProxy::TransactionFilterProxy(QObject* parent)
+    : QSortFilterProxyModel(parent),
+      m_search_string(),
+      typeFilter(COMMON_TYPES)
 {
 }
 

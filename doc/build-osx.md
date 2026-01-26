@@ -1,52 +1,15 @@
 # macOS Build Guide
 
-**Updated for MacOS [11.2](https://www.apple.com/macos/big-sur/)**
+**Updated for macOS [14](https://developer.apple.com/documentation/macos-release-notes/macos-14-release-notes/)**
 
-This guide describes how to build dashd, command-line utilities, and GUI on macOS
-
-**Note:** The following is for Intel Macs only!
-
-## Dependencies
-
-The following dependencies are **required**:
-
-Library                                                    | Purpose    | Description
------------------------------------------------------------|------------|----------------------
-[automake](https://formulae.brew.sh/formula/automake)      | Build      | Generate makefile
-[libtool](https://formulae.brew.sh/formula/libtool)        | Build      | Shared library support
-[pkg-config](https://formulae.brew.sh/formula/pkg-config)  | Build      | Configure compiler and linker flags
-[boost](https://formulae.brew.sh/formula/boost)            | Utility    | Library for threading, data structures, etc
-[libevent](https://formulae.brew.sh/formula/libevent)      | Networking | OS independent asynchronous networking
-
-The following dependencies are **optional**:
-
-Library                                                         | Purpose          | Description
---------------------------------------------------------------- |------------------|----------------------
-[berkeley-db@4](https://formulae.brew.sh/formula/berkeley-db@4) | Berkeley DB      | Wallet storage (only needed when wallet enabled)
-[qt@5](https://formulae.brew.sh/formula/qt@5)                   | GUI              | GUI toolkit (only needed when GUI enabled)
-[qrencode](https://formulae.brew.sh/formula/qrencode)           | QR codes in GUI  | Generating QR codes (only needed when GUI enabled)
-[zeromq](https://formulae.brew.sh/formula/zeromq)               | ZMQ notification | Allows generating ZMQ notifications (requires ZMQ version >= 4.0.0)
-[sqlite](https://formulae.brew.sh/formula/sqlite)               | SQLite DB        | Wallet storage (only needed when wallet enabled)
-[miniupnpc](https://formulae.brew.sh/formula/miniupnpc)         | UPnP Support     | Firewall-jumping support (needed for port mapping support)
-[libnatpmp](https://formulae.brew.sh/formula/libnatpmp)         | NAT-PMP Support  | Firewall-jumping support (needed for port mapping support)
-[python3](https://formulae.brew.sh/formula/python@3.9)          | Testing          | Python Interpreter (only needed when running the test suite)
-
-The following dependencies are **optional** packages required for deploying:
-
-Library                                             | Purpose          | Description
-----------------------------------------------------|------------------|----------------------
-[librsvg](https://formulae.brew.sh/formula/librsvg) | Deploy Dependency| Library to render SVG files
-[ds_store](https://pypi.org/project/ds-store/)      | Deploy Dependency| Examine and modify .DS_Store files
-[mac_alias](https://pypi.org/project/mac-alias/)    | Deploy Dependency| Generate/Read binary alias and bookmark records
-
-See [dependencies.md](dependencies.md) for a complete overview.
+This guide describes how to build dashd, command-line utilities, and GUI on macOS.
 
 ## Preparation
 
 The commands in this guide should be executed in a Terminal application.
 macOS comes with a built-in Terminal located in:
 
-```
+```bash
 /Applications/Utilities/Terminal.app
 ```
 
@@ -81,6 +44,8 @@ The first step is to download the required dependencies.
 These dependencies represent the packages required to get a barebones installation up and running.
 To install, run the following from your terminal:
 
+See [dependencies.md](dependencies.md) for a complete overview.
+
 ``` bash
 brew install automake libtool boost gmp pkg-config libevent
 ```
@@ -100,29 +65,21 @@ git clone https://github.com/dashpay/dash.git
 #### Wallet Dependencies
 
 It is not necessary to build wallet functionality to run `dashd` or  `dash-qt`.
-To enable legacy wallets, you must install `berkeley-db@4`.
-To enable [descriptor wallets](https://github.com/dashpay/dash/blob/master/doc/descriptors.md), `sqlite` is required.
-Skip `berkeley-db@4` if you intend to *exclusively* use descriptor wallets.
+
+###### Descriptor Wallet Support
+
+`sqlite` is required to support for descriptor wallets.
+
+macOS ships with a useable `sqlite` package, meaning you don't need to
+install anything.
 
 ###### Legacy Wallet Support
 
-`berkeley-db@4` is required to enable support for legacy wallets.
+`berkeley-db@4` is only required to support for legacy wallets.
 Skip if you don't intend to use legacy wallets.
 
 ``` bash
 brew install berkeley-db@4
-```
-
-###### Descriptor Wallet Support
-
-Note: Apple has included a useable `sqlite` package since macOS 10.14.
-You may not need to install this package.
-
-`sqlite` is required to enable support for descriptor wallets.
-Skip if you don't intend to use descriptor wallets.
-
-``` bash
-brew install sqlite
 ```
 ---
 
@@ -136,14 +93,6 @@ Skip if you don't intend to use the GUI.
 
 ``` bash
 brew install qt@5
-```
-
-Ensure that the `qt@5` package is installed, not the `qt` package.
-If 'qt' is installed, the build process will fail.
-if installed, remove the `qt` package with the following command:
-
-``` bash
-brew uninstall qt
 ```
 
 Note: Building with Qt binaries downloaded from the Qt website is not officially supported.
@@ -232,17 +181,6 @@ Additionally, this explicitly disables the GUI.
 ./autogen.sh
 ./configure --with-gui=no
 ```
-
-###### Berkeley DB
-
-It is recommended to use Berkeley DB 4.8. If you have to build it yourself,
-you can use [the installation script included in contrib/](contrib/install_db4.sh)
-like so:
-
-```shell
-./contrib/install_db4.sh .
-```
-
 ##### Wallet (only SQlite) and GUI Support:
 
 This explicitly enables the GUI and disables legacy wallet support.

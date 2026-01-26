@@ -1,12 +1,11 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2020 The Bitcoin Core developers
+// Copyright (c) 2009-2021 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <fs.h>
 #include <logging.h>
 #include <util/string.h>
-#include <util/system.h>
 #include <util/threadnames.h>
 #include <util/time.h>
 
@@ -126,9 +125,9 @@ bool BCLog::Logger::WillLogCategory(BCLog::LogFlags category) const
 
 bool BCLog::Logger::WillLogCategoryLevel(BCLog::LogFlags category, BCLog::Level level) const
 {
-    // Log messages at Warning and Error level unconditionally, so that
+    // Log messages at Info, Warning and Error level unconditionally, so that
     // important troubleshooting information doesn't get lost.
-    if (level >= BCLog::Level::Warning) return true;
+    if (level >= BCLog::Level::Info) return true;
 
     if (!WillLogCategory(category)) return false;
 
@@ -216,7 +215,7 @@ bool GetLogCategory(BCLog::LogFlags& flag, const std::string& str)
     return false;
 }
 
-std::string BCLog::Logger::LogLevelToStr(BCLog::Level level) const
+std::string BCLog::Logger::LogLevelToStr(BCLog::Level level)
 {
     switch (level) {
     case BCLog::Level::Trace:
@@ -229,8 +228,6 @@ std::string BCLog::Logger::LogLevelToStr(BCLog::Level level) const
         return "warning";
     case BCLog::Level::Error:
         return "error";
-    case BCLog::Level::None:
-        return "";
     }
     assert(false);
 }
@@ -347,8 +344,6 @@ static std::optional<BCLog::Level> GetLogLevel(const std::string& level_str)
         return BCLog::Level::Warning;
     } else if (level_str == "error") {
         return BCLog::Level::Error;
-    } else if (level_str == "none") {
-        return BCLog::Level::None;
     } else {
         return std::nullopt;
     }
@@ -383,7 +378,7 @@ static constexpr std::array<BCLog::Level, 3> LogLevelsList()
 std::string BCLog::Logger::LogLevelsString() const
 {
     const auto& levels = LogLevelsList();
-    return Join(std::vector<BCLog::Level>{levels.begin(), levels.end()}, ", ", [this](BCLog::Level level) { return LogLevelToStr(level); });
+    return Join(std::vector<BCLog::Level>{levels.begin(), levels.end()}, ", ", [](BCLog::Level level) { return LogLevelToStr(level); });
 }
 
 std::string BCLog::Logger::LogTimestampStr(const std::string& str)
@@ -396,13 +391,13 @@ std::string BCLog::Logger::LogTimestampStr(const std::string& str)
     if (m_started_new_line) {
         int64_t nTimeMicros = GetTimeMicros();
         strStamped = FormatISO8601DateTime(nTimeMicros/1000000);
-        if (m_log_time_micros) {
+        if (m_log_time_micros && !strStamped.empty()) {
             strStamped.pop_back();
             strStamped += strprintf(".%06dZ", nTimeMicros%1000000);
         }
         std::chrono::seconds mocktime = GetMockTime();
         if (mocktime > 0s) {
-            strStamped += " (mocktime: " + FormatISO8601DateTime(count_seconds(mocktime)) + ")";
+            strStamped += strprintf(" (mocktime: %d)", count_seconds(mocktime));
         }
         strStamped += ' ' + str;
     } else
@@ -433,29 +428,39 @@ namespace BCLog {
     }
 } // namespace BCLog
 
+std::string BCLog::Logger::GetLogPrefix(BCLog::LogFlags category, BCLog::Level level) const
+{
+    if (category == LogFlags::NONE) category = LogFlags::ALL;
+
+    const bool has_category{m_always_print_category_level || category != LogFlags::ALL};
+
+    // If there is no category, Info is implied
+    if (!has_category && level == Level::Info) return {};
+
+    std::string s{"["};
+    if (has_category) {
+        s += LogCategoryToStr(category);
+    }
+
+    if (m_always_print_category_level || !has_category || level != Level::Debug) {
+        // If there is a category, Debug is implied, so don't add the level
+
+        // Only add separator if we have a category
+        if (has_category) s += ":";
+        s += Logger::LogLevelToStr(level);
+    }
+
+    s += "] ";
+    return s;
+}
+
 void BCLog::Logger::LogPrintStr(const std::string& str, const std::string& logging_function, const std::string& source_file, int source_line, BCLog::LogFlags category, BCLog::Level level)
 {
     StdLockGuard scoped_lock(m_cs);
     std::string str_prefixed = LogEscapeMessage(str);
 
-    if ((category != LogFlags::NONE || level != Level::None) && m_started_new_line) {
-        std::string s{"["};
-
-        if (category != LogFlags::NONE) {
-            s += LogCategoryToStr(category);
-        }
-
-        if (category != LogFlags::NONE && level != Level::None) {
-            // Only add separator if both flag and level are not NONE
-            s += ":";
-        }
-
-        if (level != Level::None) {
-            s += LogLevelToStr(level);
-        }
-
-        s += "] ";
-        str_prefixed.insert(0, s);
+    if (m_started_new_line) {
+        str_prefixed.insert(0, GetLogPrefix(category, level));
     }
 
     if (m_log_sourcelocations && m_started_new_line) {
@@ -463,8 +468,9 @@ void BCLog::Logger::LogPrintStr(const std::string& str, const std::string& loggi
     }
 
     if (m_log_threadnames && m_started_new_line) {
+        const auto& threadname = util::ThreadGetInternalName();
         // 16 chars total, "dash-" is 5 of them and another 1 is a NUL terminator
-        str_prefixed.insert(0, "[" + strprintf("%10s", util::ThreadGetInternalName()) + "] ");
+        str_prefixed.insert(0, "[" + strprintf("%10s", (threadname.empty() ? "unknown" : threadname)) + "] ");
     }
 
     str_prefixed = LogTimestampStr(str_prefixed);

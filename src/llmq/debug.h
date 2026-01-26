@@ -17,6 +17,7 @@ class CDeterministicMNManager;
 class ChainstateManager;
 class CInv;
 class CScheduler;
+struct RPCResult;
 
 namespace llmq
 {
@@ -77,8 +78,9 @@ public:
 public:
     CDKGDebugSessionStatus() : statusBitset(0) {}
 
-    UniValue ToJson(CDeterministicMNManager& dmnman, CQuorumSnapshotManager& qsnapman,
-                    const ChainstateManager& chainman, int quorumIndex, int detailLevel) const;
+    [[nodiscard]] static RPCResult GetJsonHelp(const std::string& key, bool optional);
+    [[nodiscard]] UniValue ToJson(CDeterministicMNManager& dmnman, CQuorumSnapshotManager& qsnapman,
+                                  const ChainstateManager& chainman, int quorumIndex, int detailLevel) const;
 };
 
 class CDKGDebugStatus
@@ -90,8 +92,9 @@ public:
     //std::map<Consensus::LLMQType, CDKGDebugSessionStatus> sessions;
 
 public:
-    UniValue ToJson(CDeterministicMNManager& dmnman, CQuorumSnapshotManager& qsnapman,
-                    const ChainstateManager& chainman, int detailLevel) const;
+    [[nodiscard]] static RPCResult GetJsonHelp(const std::string& key, bool optional, bool inner_optional = false);
+    [[nodiscard]] UniValue ToJson(CDeterministicMNManager& dmnman, CQuorumSnapshotManager& qsnapman,
+                                  const ChainstateManager& chainman, int detailLevel) const;
 };
 
 class CDKGDebugManager
@@ -101,15 +104,23 @@ private:
     CDKGDebugStatus localStatus GUARDED_BY(cs_lockStatus);
 
 public:
+    CDKGDebugManager(const CDKGDebugManager&) = delete;
+    CDKGDebugManager& operator=(const CDKGDebugManager&) = delete;
     CDKGDebugManager();
+    ~CDKGDebugManager();
 
-    void GetLocalDebugStatus(CDKGDebugStatus& ret) const;
+    void GetLocalDebugStatus(CDKGDebugStatus& ret) const EXCLUSIVE_LOCKS_REQUIRED(!cs_lockStatus);
 
-    void ResetLocalSessionStatus(Consensus::LLMQType llmqType, int quorumIndex);
-    void InitLocalSessionStatus(const Consensus::LLMQParams& llmqParams, int quorumIndex, const uint256& quorumHash, int quorumHeight);
+    void ResetLocalSessionStatus(Consensus::LLMQType llmqType, int quorumIndex) EXCLUSIVE_LOCKS_REQUIRED(!cs_lockStatus);
+    void InitLocalSessionStatus(const Consensus::LLMQParams& llmqParams, int quorumIndex, const uint256& quorumHash,
+                                int quorumHeight) EXCLUSIVE_LOCKS_REQUIRED(!cs_lockStatus);
 
-    void UpdateLocalSessionStatus(Consensus::LLMQType llmqType, int quorumIndex, std::function<bool(CDKGDebugSessionStatus& status)>&& func);
-    void UpdateLocalMemberStatus(Consensus::LLMQType llmqType, int quorumIndex, size_t memberIdx, std::function<bool(CDKGDebugMemberStatus& status)>&& func);
+    void UpdateLocalSessionStatus(Consensus::LLMQType llmqType, int quorumIndex,
+                                  std::function<bool(CDKGDebugSessionStatus& status)>&& func)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs_lockStatus);
+    void UpdateLocalMemberStatus(Consensus::LLMQType llmqType, int quorumIndex, size_t memberIdx,
+                                 std::function<bool(CDKGDebugMemberStatus& status)>&& func)
+        EXCLUSIVE_LOCKS_REQUIRED(!cs_lockStatus);
 };
 
 } // namespace llmq

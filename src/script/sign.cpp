@@ -1,5 +1,5 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2020 The Bitcoin Core developers
+// Copyright (c) 2009-2021 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -17,16 +17,16 @@
 
 typedef std::vector<unsigned char> valtype;
 
-MutableTransactionSignatureCreator::MutableTransactionSignatureCreator(const CMutableTransaction* txToIn, unsigned int nInIn, const CAmount& amountIn, int nHashTypeIn)
-    : txTo(txToIn), nIn(nInIn), nHashType(nHashTypeIn), amount(amountIn), checker(txTo, nIn, amountIn, MissingDataBehavior::FAIL),
+MutableTransactionSignatureCreator::MutableTransactionSignatureCreator(const CMutableTransaction& tx, unsigned int input_idx, const CAmount& amount, int hash_type)
+    : m_txto{tx}, nIn{input_idx}, nHashType{hash_type}, amount{amount}, checker{&m_txto, nIn, amount, MissingDataBehavior::FAIL},
       m_txdata(nullptr)
 {
 }
 
-MutableTransactionSignatureCreator::MutableTransactionSignatureCreator(const CMutableTransaction* txToIn, unsigned int nInIn, const CAmount& amountIn, const PrecomputedTransactionData* txdata, int nHashTypeIn)
-    : txTo(txToIn), nIn(nInIn), nHashType(nHashTypeIn), amount(amountIn),
-      checker(txdata ? MutableTransactionSignatureChecker(txTo, nIn, amount, *txdata, MissingDataBehavior::FAIL) :
-          MutableTransactionSignatureChecker(txTo, nIn, amount, MissingDataBehavior::FAIL)),
+MutableTransactionSignatureCreator::MutableTransactionSignatureCreator(const CMutableTransaction& tx, unsigned int input_idx, const CAmount& amount, const PrecomputedTransactionData* txdata, int hash_type)
+    : m_txto{tx}, nIn{input_idx}, nHashType{hash_type}, amount{amount},
+      checker{txdata ? MutableTransactionSignatureChecker{&m_txto, nIn, amount, *txdata, MissingDataBehavior::FAIL} :
+                       MutableTransactionSignatureChecker{&m_txto, nIn, amount, MissingDataBehavior::FAIL}},
       m_txdata(txdata)
 {
 }
@@ -37,7 +37,7 @@ bool MutableTransactionSignatureCreator::CreateSig(const SigningProvider& provid
     if (!provider.GetKey(address, key))
         return false;
 
-    uint256 hash = SignatureHash(scriptCode, *txTo, nIn, nHashType, amount, sigversion, m_txdata);
+    uint256 hash = SignatureHash(scriptCode, m_txto, nIn, nHashType, amount, sigversion, m_txdata);
     if (!key.Sign(hash, vchSig))
         return false;
     vchSig.push_back((unsigned char)nHashType);
@@ -107,7 +107,6 @@ static bool SignStep(const SigningProvider& provider, const BaseSignatureCreator
                      std::vector<valtype>& ret, TxoutType& whichTypeRet, SigVersion sigversion, SignatureData& sigdata)
 {
     CScript scriptRet;
-    uint160 h160;
     ret.clear();
     std::vector<unsigned char> sig;
 
@@ -135,8 +134,8 @@ static bool SignStep(const SigningProvider& provider, const BaseSignatureCreator
         ret.push_back(ToByteVector(pubkey));
         return true;
     }
-    case TxoutType::SCRIPTHASH:
-        h160 = uint160(vSolutions[0]);
+    case TxoutType::SCRIPTHASH: {
+        uint160 h160{vSolutions[0]};
         if (GetCScript(provider, sigdata, CScriptID{h160}, scriptRet)) {
             ret.push_back(std::vector<unsigned char>(scriptRet.begin(), scriptRet.end()));
             return true;
@@ -144,7 +143,7 @@ static bool SignStep(const SigningProvider& provider, const BaseSignatureCreator
         // Could not find redeemScript, add to missing
         sigdata.missing_redeem_script = h160;
         return false;
-
+    }
     case TxoutType::MULTISIG: {
         size_t required = vSolutions.front()[0];
         ret.push_back(valtype()); // workaround CHECKMULTISIG bug
@@ -177,6 +176,8 @@ static CScript PushAll(const std::vector<valtype>& values)
             result << OP_0;
         } else if (v.size() == 1 && v[0] >= 1 && v[0] <= 16) {
             result << CScript::EncodeOP_N(v[0]);
+        } else if (v.size() == 1 && v[0] == 0x81) {
+            result << OP_1NEGATE;
         } else {
             result << v;
         }
@@ -216,17 +217,17 @@ bool ProduceSignature(const SigningProvider& provider, const BaseSignatureCreato
 }
 
 namespace {
-class SignatureExtractorChecker final : public BaseSignatureChecker
+class SignatureExtractorChecker final : public DeferringSignatureChecker
 {
 private:
     SignatureData& sigdata;
-    BaseSignatureChecker& checker;
 
 public:
-    SignatureExtractorChecker(SignatureData& sigdata, BaseSignatureChecker& checker) : sigdata(sigdata), checker(checker) {}
+    SignatureExtractorChecker(SignatureData& sigdata, BaseSignatureChecker& checker) : DeferringSignatureChecker(checker), sigdata(sigdata) {}
+
     bool CheckSig(const std::vector<unsigned char>& scriptSig, const std::vector<unsigned char>& vchPubKey, const CScript& scriptCode, SigVersion sigversion) const override
     {
-        if (checker.CheckSig(scriptSig, vchPubKey, scriptCode, sigversion)) {
+        if (m_checker.CheckSig(scriptSig, vchPubKey, scriptCode, sigversion)) {
             CPubKey pubkey(vchPubKey);
             sigdata.signatures.emplace(pubkey.GetID(), SigPair(pubkey, scriptSig));
             return true;
@@ -239,16 +240,10 @@ struct Stacks
 {
     std::vector<valtype> script;
 
-    Stacks() {}
-    explicit Stacks(const std::vector<valtype>& scriptSigStack_) : script(scriptSigStack_) {}
+    Stacks() = delete;
+    Stacks(const Stacks&) = delete;
     explicit Stacks(const SignatureData& data) {
         EvalScript(script, data.scriptSig, SCRIPT_VERIFY_STRICTENC, BaseSignatureChecker(), SigVersion::BASE);
-    }
-
-    SignatureData Output() const {
-        SignatureData result;
-        result.scriptSig = PushAll(script);
-        return result;
     }
 };
 }
@@ -328,7 +323,7 @@ bool SignSignature(const SigningProvider &provider, const CScript& fromPubKey, C
 {
     assert(nIn < txTo.vin.size());
 
-    MutableTransactionSignatureCreator creator(&txTo, nIn, amount, nHashType);
+    MutableTransactionSignatureCreator creator(txTo, nIn, amount, nHashType);
 
     SignatureData sigdata;
     bool ret = ProduceSignature(provider, creator, fromPubKey, sigdata);
@@ -351,11 +346,14 @@ namespace {
 class DummySignatureChecker final : public BaseSignatureChecker
 {
 public:
-    DummySignatureChecker() {}
+    DummySignatureChecker() = default;
     bool CheckSig(const std::vector<unsigned char>& scriptSig, const std::vector<unsigned char>& vchPubKey, const CScript& scriptCode, SigVersion sigversion) const override { return true; }
 };
-const DummySignatureChecker DUMMY_CHECKER;
+}
 
+const BaseSignatureChecker& DUMMY_CHECKER = DummySignatureChecker();
+
+namespace {
 class DummySignatureCreator final : public BaseSignatureCreator {
 private:
     char m_r_len = 32;
@@ -441,7 +439,7 @@ bool SignTransaction(CMutableTransaction& mtx, const SigningProvider* keystore, 
         SignatureData sigdata = DataFromTransaction(mtx, i, coin->second.out);
         // Only sign SIGHASH_SINGLE if there's a corresponding output:
         if (!fHashSingle || (i < mtx.vout.size())) {
-            ProduceSignature(*keystore, MutableTransactionSignatureCreator(&mtx, i, amount, &txdata, nHashType), prevPubKey, sigdata);
+            ProduceSignature(*keystore, MutableTransactionSignatureCreator(mtx, i, amount, &txdata, nHashType), prevPubKey, sigdata);
         }
 
         UpdateInput(txin, sigdata);

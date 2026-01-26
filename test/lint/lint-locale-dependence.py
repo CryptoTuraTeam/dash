@@ -49,6 +49,7 @@ KNOWN_VIOLATIONS = [
     "src/dbwrapper.cpp:.*vsnprintf",
     "src/test/fuzz/locale.cpp",
     "src/test/fuzz/string.cpp",
+    "src/test/util_tests.cpp",
     "src/util/strencodings.cpp:.*strtoll",
     "src/util/system.cpp:.*fprintf",
     "src/wallet/bdb.cpp:.*DbEnv::strerror",  # False positive
@@ -61,7 +62,6 @@ REGEXP_EXTERNAL_DEPENDENCIES_EXCLUSIONS = [
     "src/secp256k1/",
     "src/minisketch/",
     "src/tinyformat.h",
-    "src/univalue/",
     "src/dashbls/",
     "src/immer/"
 ]
@@ -227,7 +227,7 @@ def find_locale_dependent_function_uses():
     git_grep_output = list()
 
     try:
-        git_grep_output = check_output(git_grep_command, universal_newlines=True, encoding="utf8").splitlines()
+        git_grep_output = check_output(git_grep_command, text=True, encoding="utf8").splitlines()
     except CalledProcessError as e:
         if e.returncode > 1:
             raise e
@@ -254,7 +254,7 @@ def main():
             exit_code = 1
 
     if exit_code == 1:
-        print("Unnecessary locale depedence can cause bugs that are very tricky to isolate and fix. Please avoid using locale dependent functions if possible.\n")
+        print("Unnecessary locale dependence can cause bugs that are very tricky to isolate and fix. Please avoid using locale-dependent functions if possible.\n")
         print(f"Advice not applicable in this specific case? Add an exception by updating the ignore list in {sys.argv[0]}")
 
     sys.exit(exit_code)

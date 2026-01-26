@@ -90,6 +90,7 @@ SHORTID = {
     165: b"headers2",
     166: b"getqrinfo",
     167: b"qrinfo",
+    168: b"platformban",
 }
 
 # Dictionary which contains short message type ID for the P2P message
@@ -106,7 +107,7 @@ class EncryptedP2PState:
             - initiating = True for inbound connections in the test framework   [TestNode <------- P2PConnection]
             - initiating = False for outbound connections in the test framework [TestNode -------> P2PConnection]
 
-        net (string): chain used (regtest, signet etc..)
+        net (string): chain used (regtest, devnet etc..)
 
     Methods:
         perform an advanced form of diffie-hellman handshake to instantiate the encrypted transport. before exchanging

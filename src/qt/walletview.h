@@ -1,4 +1,4 @@
-// Copyright (c) 2011-2020 The Bitcoin Core developers
+// Copyright (c) 2011-2021 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -6,6 +6,7 @@
 #define BITCOIN_QT_WALLETVIEW_H
 
 #include <consensus/amount.h>
+#include <qt/bitcoinunits.h>
 #include <qt/governancelist.h>
 #include <qt/masternodelist.h>
 
@@ -37,27 +38,27 @@ class WalletView : public QStackedWidget
     Q_OBJECT
 
 public:
-    explicit WalletView(QWidget* parent);
+    explicit WalletView(WalletModel* wallet_model, QWidget* parent);
     ~WalletView();
 
     /** Set the client model.
         The client model represents the part of the core that communicates with the P2P network, and is wallet-agnostic.
     */
     void setClientModel(ClientModel *clientModel);
-    WalletModel *getWalletModel() { return walletModel; }
-    /** Set the wallet model.
-        The wallet model represents a bitcoin wallet, and offers access to the list of transactions, address book and sending
-        functionality.
-    */
-    void setWalletModel(WalletModel *walletModel);
+    WalletModel* getWalletModel() const noexcept { return walletModel; }
 
     bool handlePaymentRequest(const SendCoinsRecipient& recipient);
 
     void showOutOfSyncWarning(bool fShow);
 
 private:
-    ClientModel *clientModel;
-    WalletModel *walletModel;
+    ClientModel* clientModel{nullptr};
+
+    //!
+    //! The wallet model represents a bitcoin wallet, and offers access to
+    //! the list of transactions, address book and sending functionality.
+    //!
+    WalletModel* const walletModel;
 
     OverviewPage *overviewPage;
     QWidget *transactionsPage;
@@ -106,6 +107,8 @@ public Q_SLOTS:
     void backupWallet();
     /** Change encrypted wallet passphrase */
     void changePassphrase();
+    /** Show wallet mnemonic/recovery phrase */
+    void showMnemonic();
     /** Ask for passphrase to unlock wallet temporarily */
     void unlockWallet(bool fAnonymizeOnly=false);
     /** Lock wallet */
@@ -130,7 +133,7 @@ Q_SIGNALS:
     /** Encryption status of wallet changed */
     void encryptionStatusChanged();
     /** Notify that a new transaction appeared */
-    void incomingTransaction(const QString& date, int unit, const CAmount& amount, const QString& type, const QString& address, const QString& label, const QString& walletName);
+    void incomingTransaction(const QString& date, BitcoinUnit unit, const CAmount& amount, const QString& type, const QString& address, const QString& label, const QString& walletName);
     /** Notify that the out of sync warning icon has been pressed */
     void outOfSyncWarningClicked();
 };

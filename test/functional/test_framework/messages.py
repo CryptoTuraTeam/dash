@@ -30,7 +30,7 @@ import unittest
 from test_framework.crypto.siphash import siphash256
 from test_framework.util import assert_equal
 
-import dash_hash
+import dash_hash # type: ignore[import]
 
 MAX_LOCATOR_SZ = 101
 MAX_BLOCK_SIZE = 2000000
@@ -40,7 +40,7 @@ MAX_BLOOM_HASH_FUNCS = 50
 COIN = 100000000  # 1 btc in satoshis
 MAX_MONEY = 21000000 * COIN
 
-BIP125_SEQUENCE_NUMBER = 0xfffffffd  # Sequence number that is BIP 125 opt-in and BIP 68-opt-out
+BIP125_SEQUENCE_NUMBER = 0xfffffffd  # Sequence number that is BIP 125 opt-in and BIP 68-opt-out -- not used in DASH
 SEQUENCE_FINAL = 0xffffffff  # Sequence number that disables nLockTime if set for every input of a tx
 
 MAX_PROTOCOL_MESSAGE_LENGTH = 3 * 1024 * 1024  # Maximum length of incoming protocol messages
@@ -64,6 +64,12 @@ MSG_CMPCT_BLOCK = 20
 MSG_TYPE_MASK = 0xffffffff >> 2
 
 FILTER_TYPE_BASIC = 0
+
+DEFAULT_ANCESTOR_LIMIT = 25    # default max number of in-mempool ancestors
+DEFAULT_DESCENDANT_LIMIT = 25  # default max number of in-mempool descendants
+
+# Default setting for -datacarriersize. 80 bytes of data, +1 for OP_RETURN, +2 for the pushdata opcodes.
+MAX_OP_RETURN_RELAY = 83
 
 MAGIC_BYTES = {
     "mainnet": b"\xbf\x0c\x6b\xbd",   # mainnet
@@ -224,6 +230,20 @@ def from_hex(obj, hex_string):
 def tx_from_hex(hex_string):
     """Deserialize from hex string to a transaction object"""
     return from_hex(CTransaction(), hex_string)
+
+
+# like from_hex, but without the hex part
+def from_binary(cls, stream):
+    """deserialize a binary stream (or bytes object) into an object"""
+    # handle bytes object by turning it into a stream
+    was_bytes = isinstance(stream, bytes)
+    if was_bytes:
+        stream = BytesIO(stream)
+    obj = cls()
+    obj.deserialize(stream)
+    if was_bytes:
+        assert len(stream.read()) == 0
+    return obj
 
 
 # Objects that map to dashd objects, which can be serialized/deserialized
@@ -1407,6 +1427,34 @@ class CFinalCommitment:
             .format(self.nVersion, self.llmqType, self.quorumHash, self.quorumIndex, repr(self.signers),
                     repr(self.validMembers), self.quorumPublicKey.hex(), self.quorumVvecHash, self.quorumSig.hex(), self.membersSig.hex())
 
+
+class CFinalCommitmentPayload:
+    __slots__ = ("nVersion", "nHeight", "commitment")
+
+    def __init__(self):
+        self.set_null()
+
+    def set_null(self):
+        self.nVersion = 0
+        self.nHeight = 0
+        self.commitment = CFinalCommitment()
+
+    def deserialize(self, f):
+        self.nVersion = struct.unpack("<H", f.read(2))[0]
+        self.nHeight = struct.unpack("<I", f.read(4))[0]
+        self.commitment = CFinalCommitment()
+        self.commitment.deserialize(f)
+
+    def serialize(self):
+        r = b""
+        r += struct.pack("<H", self.nVersion)
+        r += struct.pack("<I", self.nHeight)
+        r += self.commitment.serialize()
+        return r
+
+    def __repr__(self):
+        return f"CFinalCommitmentPayload(nVersion={self.nVersion} nHeight={self.nHeight} commitment={self.commitment})"
+
 class CGovernanceObject:
     __slots__ = ("nHashParent", "nRevision", "nTime", "nCollateralHash", "vchData", "nObjectType",
                  "masternodeOutpoint", "vchSig")
@@ -2343,6 +2391,41 @@ class msg_isdlock:
     def __repr__(self):
         return "msg_isdlock(nVersion=%d, inputs=%s, txid=%064x, cycleHash=%064x)" % \
                (self.nVersion, repr(self.inputs), self.txid, self.cycleHash)
+
+
+class msg_platformban:
+    __slots__ = ("protx_hash", "requested_height", "quorum_hash", "sig")
+    msgtype = b"platformban"
+
+    def __init__(self, protx_hash=0, requested_height=0, quorum_hash=0, sig=b'\x00' * 96):
+        self.protx_hash = protx_hash
+        self.requested_height = requested_height
+        self.quorum_hash = quorum_hash
+        self.sig = sig
+
+    def deserialize(self, f):
+        self.protx_hash = deser_uint256(f)
+        self.requested_height= struct.unpack("<I", f.read(4))[0]
+        self.quorum_hash = deser_uint256(f)
+        self.sig = f.read(96)
+
+    def serialize(self):
+        r = b""
+        r += ser_uint256(self.protx_hash)
+        r += struct.pack("<I", self.requested_height)
+        r += ser_uint256(self.quorum_hash)
+        r += self.sig
+        return r
+
+    def calc_sha256(self):
+        r = b""
+        r += ser_uint256(self.protx_hash)
+        r += struct.pack("<I", self.requested_height)
+        return uint256_from_str(hash256(r))
+
+    def __repr__(self):
+        return "msg_platformban(protx_hash=%064x requested_height=%d, quorum_hash=%064x)" % \
+               (self.protx_hash, self.requested_height, self.quorum_hash)
 
 
 class msg_qsigshare:

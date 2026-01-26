@@ -1,6 +1,6 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2020 The Bitcoin Core developers
-// Copyright (c) 2014-2024 The Dash Core developers
+// Copyright (c) 2009-2021 The Bitcoin Core developers
+// Copyright (c) 2014-2025 The Dash Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -28,16 +28,14 @@
 #include <stacktraces.h>
 #include <util/url.h>
 
+#include <cstdio>
 #include <functional>
-#include <stdio.h>
+
+using node::NodeContext;
 
 const std::function<std::string(const char*)> G_TRANSLATION_FUN = nullptr;
 UrlDecodeFn* const URL_DECODE = urlDecode;
 
-//////////////////////////////////////////////////////////////////////////////
-//
-// Start
-//
 #if HAVE_DECL_FORK
 
 /** Custom implementation of daemon(). This implements the same order of operations as glibc.
@@ -134,9 +132,10 @@ static bool AppInit(NodeContext& node, int argc, char* argv[])
     if (HelpRequested(args) || args.IsArgSet("-version")) {
         std::string strUsage = PACKAGE_NAME " version " + FormatFullVersion() + "\n";
 
-        if (!args.IsArgSet("-version")) {
-            strUsage += FormatParagraph(LicenseInfo()) + "\n"
-                "\nUsage:  dashd [options]                     Start " PACKAGE_NAME "\n"
+        if (args.IsArgSet("-version")) {
+            strUsage += FormatParagraph(LicenseInfo());
+        } else {
+            strUsage += "\nUsage:  dashd [options]                     Start " PACKAGE_NAME "\n"
                 "\n";
             strUsage += args.GetHelpMessage();
         }
@@ -162,7 +161,7 @@ static bool AppInit(NodeContext& node, int argc, char* argv[])
         if (!args.ReadConfigFiles(error, true)) {
             return InitError(Untranslated(strprintf("Error reading configuration file: %s\n", error)));
         }
-        // Check for -chain, -testnet or -regtest parameter (Params() calls are only valid after this clause)
+        // Check for chain settings (Params() calls are only valid after this clause)
         try {
             SelectParams(args.GetChainName());
         } catch (const std::exception& e) {
@@ -219,7 +218,7 @@ static bool AppInit(NodeContext& node, int argc, char* argv[])
                 if (token) { // Success
                     exit(EXIT_SUCCESS);
                 } else { // fRet = false or token read error (premature exit).
-                    tfm::format(std::cerr, "Error during initializaton - check debug.log for details\n");
+                    tfm::format(std::cerr, "Error during initialization - check debug.log for details\n");
                     exit(EXIT_FAILURE);
                 }
             }

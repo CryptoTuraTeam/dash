@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2020 The Bitcoin Core developers
+// Copyright (c) 2012-2021 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -721,47 +721,55 @@ BOOST_AUTO_TEST_CASE(get_local_addr_for_peer_port)
 
 BOOST_AUTO_TEST_CASE(LimitedAndReachable_Network)
 {
-    BOOST_CHECK(IsReachable(NET_IPV4));
-    BOOST_CHECK(IsReachable(NET_IPV6));
-    BOOST_CHECK(IsReachable(NET_ONION));
-    BOOST_CHECK(IsReachable(NET_I2P));
-    BOOST_CHECK(IsReachable(NET_CJDNS));
+    BOOST_CHECK(g_reachable_nets.Contains(NET_IPV4));
+    BOOST_CHECK(g_reachable_nets.Contains(NET_IPV6));
+    BOOST_CHECK(g_reachable_nets.Contains(NET_ONION));
+    BOOST_CHECK(g_reachable_nets.Contains(NET_I2P));
+    BOOST_CHECK(g_reachable_nets.Contains(NET_CJDNS));
 
-    SetReachable(NET_IPV4, false);
-    SetReachable(NET_IPV6, false);
-    SetReachable(NET_ONION, false);
-    SetReachable(NET_I2P, false);
-    SetReachable(NET_CJDNS, false);
+    g_reachable_nets.Remove(NET_IPV4);
+    g_reachable_nets.Remove(NET_IPV6);
+    g_reachable_nets.Remove(NET_ONION);
+    g_reachable_nets.Remove(NET_I2P);
+    g_reachable_nets.Remove(NET_CJDNS);
 
-    BOOST_CHECK(!IsReachable(NET_IPV4));
-    BOOST_CHECK(!IsReachable(NET_IPV6));
-    BOOST_CHECK(!IsReachable(NET_ONION));
-    BOOST_CHECK(!IsReachable(NET_I2P));
-    BOOST_CHECK(!IsReachable(NET_CJDNS));
+    BOOST_CHECK(!g_reachable_nets.Contains(NET_IPV4));
+    BOOST_CHECK(!g_reachable_nets.Contains(NET_IPV6));
+    BOOST_CHECK(!g_reachable_nets.Contains(NET_ONION));
+    BOOST_CHECK(!g_reachable_nets.Contains(NET_I2P));
+    BOOST_CHECK(!g_reachable_nets.Contains(NET_CJDNS));
 
-    SetReachable(NET_IPV4, true);
-    SetReachable(NET_IPV6, true);
-    SetReachable(NET_ONION, true);
-    SetReachable(NET_I2P, true);
-    SetReachable(NET_CJDNS, true);
+    g_reachable_nets.Add(NET_IPV4);
+    g_reachable_nets.Add(NET_IPV6);
+    g_reachable_nets.Add(NET_ONION);
+    g_reachable_nets.Add(NET_I2P);
+    g_reachable_nets.Add(NET_CJDNS);
 
-    BOOST_CHECK(IsReachable(NET_IPV4));
-    BOOST_CHECK(IsReachable(NET_IPV6));
-    BOOST_CHECK(IsReachable(NET_ONION));
-    BOOST_CHECK(IsReachable(NET_I2P));
-    BOOST_CHECK(IsReachable(NET_CJDNS));
+    BOOST_CHECK(g_reachable_nets.Contains(NET_IPV4));
+    BOOST_CHECK(g_reachable_nets.Contains(NET_IPV6));
+    BOOST_CHECK(g_reachable_nets.Contains(NET_ONION));
+    BOOST_CHECK(g_reachable_nets.Contains(NET_I2P));
+    BOOST_CHECK(g_reachable_nets.Contains(NET_CJDNS));
 }
 
 BOOST_AUTO_TEST_CASE(LimitedAndReachable_NetworkCaseUnroutableAndInternal)
 {
-    BOOST_CHECK(IsReachable(NET_UNROUTABLE));
-    BOOST_CHECK(IsReachable(NET_INTERNAL));
+    // Should be reachable by default.
+    BOOST_CHECK(g_reachable_nets.Contains(NET_UNROUTABLE));
+    BOOST_CHECK(g_reachable_nets.Contains(NET_INTERNAL));
 
-    SetReachable(NET_UNROUTABLE, false);
-    SetReachable(NET_INTERNAL, false);
+    g_reachable_nets.RemoveAll();
 
-    BOOST_CHECK(IsReachable(NET_UNROUTABLE)); // Ignored for both networks
-    BOOST_CHECK(IsReachable(NET_INTERNAL));
+    BOOST_CHECK(!g_reachable_nets.Contains(NET_UNROUTABLE));
+    BOOST_CHECK(!g_reachable_nets.Contains(NET_INTERNAL));
+
+    g_reachable_nets.Add(NET_IPV4);
+    g_reachable_nets.Add(NET_IPV6);
+    g_reachable_nets.Add(NET_ONION);
+    g_reachable_nets.Add(NET_I2P);
+    g_reachable_nets.Add(NET_CJDNS);
+    g_reachable_nets.Add(NET_UNROUTABLE);
+    g_reachable_nets.Add(NET_INTERNAL);
 }
 
 CNetAddr UtilBuildAddress(unsigned char p1, unsigned char p2, unsigned char p3, unsigned char p4)
@@ -779,13 +787,13 @@ BOOST_AUTO_TEST_CASE(LimitedAndReachable_CNetAddr)
 {
     CNetAddr addr = UtilBuildAddress(0x001, 0x001, 0x001, 0x001); // 1.1.1.1
 
-    SetReachable(NET_IPV4, true);
-    BOOST_CHECK(IsReachable(addr));
+    g_reachable_nets.Add(NET_IPV4);
+    BOOST_CHECK(g_reachable_nets.Contains(addr));
 
-    SetReachable(NET_IPV4, false);
-    BOOST_CHECK(!IsReachable(addr));
+    g_reachable_nets.Remove(NET_IPV4);
+    BOOST_CHECK(!g_reachable_nets.Contains(addr));
 
-    SetReachable(NET_IPV4, true); // have to reset this, because this is stateful.
+    g_reachable_nets.Add(NET_IPV4); // have to reset this, because this is stateful.
 }
 
 
@@ -793,7 +801,7 @@ BOOST_AUTO_TEST_CASE(LocalAddress_BasicLifecycle)
 {
     CService addr = CService(UtilBuildAddress(0x002, 0x001, 0x001, 0x001), 1000); // 2.1.1.1:1000
 
-    SetReachable(NET_IPV4, true);
+    g_reachable_nets.Add(NET_IPV4);
 
     BOOST_CHECK(!IsLocal(addr));
     BOOST_CHECK(AddLocal(addr, 1000));
@@ -919,7 +927,7 @@ BOOST_AUTO_TEST_CASE(advertise_local_address)
                                        ConnectionType::OUTBOUND_FULL_RELAY,
                                        /*inbound_onion=*/false);
     };
-    SetReachable(NET_CJDNS, true);
+    g_reachable_nets.Add(NET_CJDNS);
 
     CAddress addr_ipv4{Lookup("1.2.3.4", 8333, false).value(), NODE_NONE};
     BOOST_REQUIRE(addr_ipv4.IsValid());
@@ -1046,7 +1054,11 @@ public:
     V2TransportTester(bool test_initiator) :
         m_transport(0, test_initiator, SER_NETWORK, INIT_PROTO_VERSION),
         m_cipher{GenerateRandomTestKey(), MakeByteSpan(InsecureRand256())},
-        m_test_initiator(test_initiator) {}
+        m_test_initiator(test_initiator)
+    {
+        // Set peer version for v2 short ID negotiation
+        m_transport.SetPeerVersion(PROTOCOL_VERSION);
+    }
 
     /** Data type returned by Interact:
      *
@@ -1112,6 +1124,9 @@ public:
 
     /** Expose the cipher. */
     BIP324Cipher& GetCipher() { return m_cipher; }
+
+    /** Expose the transport. */
+    V2Transport& GetTransport() { return m_transport; }
 
     /** Schedule bytes to be sent to the transport. */
     void Send(Span<const uint8_t> data)
@@ -1534,13 +1549,15 @@ BOOST_AUTO_TEST_CASE(v2transport_test)
         tester.CompareSessionIDs();
         auto msg_data_1 = g_insecure_rand_ctx.randbytes<uint8_t>(MAX_PROTOCOL_MESSAGE_LENGTH); // test that receiving max size payload works
         auto msg_data_2 = g_insecure_rand_ctx.randbytes<uint8_t>(MAX_PROTOCOL_MESSAGE_LENGTH); // test that sending max size payload works
+        // Send an unknown/invalid short ID. Valid Bitcoin IDs are [0, V2_BITCOIN_IDS.size()-1],
+        // valid Dash IDs are [128, 128+V2_DASH_IDS.size()-1]. Generate IDs outside these ranges.
         tester.SendMessage([]() {
             if (g_insecure_rand_ctx.randbool()) {
-                return static_cast<uint8_t>(InsecureRandRange(95) + 33); // Bitcoin's range
+                return static_cast<uint8_t>(InsecureRandRange(95) + 33); // Invalid Bitcoin range [33, 127]
             } else {
-                return static_cast<uint8_t>(InsecureRandRange(88) + 40 + 128); // Dash's range
+                return static_cast<uint8_t>(InsecureRandRange(87) + 169); // Invalid Dash range [169, 255]
             }
-        }(), {}); // unknown short id
+        }(), {});
         tester.SendMessage(uint8_t(2), msg_data_1); // "block" short id
         tester.AddMessage("blocktxn", msg_data_2); // schedule blocktxn to be sent to us
         ret = tester.Interact();
@@ -1564,6 +1581,86 @@ BOOST_AUTO_TEST_CASE(v2transport_test)
         tester.SendV1Version(CreateChainParams(*m_node.args, CBaseChainParams::MAIN)->MessageStart());
         auto ret = tester.Interact();
         BOOST_CHECK(!ret);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(v2_short_id_version_negotiation)
+{
+    // Test that v2 short ID encoding respects peer protocol version.
+    // This ensures backwards compatibility when adding new short IDs.
+
+    // Test 1: Baseline messages (short IDs 0-167) work with any v2-capable peer
+    {
+        V2TransportTester tester(true);
+        tester.GetTransport().SetPeerVersion(BIP324_DASH_BASELINE_VERSION); // v70235
+
+        auto ret = tester.Interact();
+        BOOST_REQUIRE(ret && ret->empty());
+        tester.SendKey();
+        tester.SendGarbage();
+        tester.ReceiveKey();
+        tester.SendGarbageTerm();
+        tester.SendVersion();
+        ret = tester.Interact();
+        BOOST_REQUIRE(ret && ret->empty());
+        tester.ReceiveGarbage();
+        tester.ReceiveVersion();
+
+        // SPORK (short ID 128) should use short encoding
+        auto msg_data = g_insecure_rand_ctx.randbytes<uint8_t>(100);
+        tester.AddMessage("spork", msg_data);
+        ret = tester.Interact();
+        BOOST_REQUIRE(ret && ret->empty());
+        tester.ReceiveMessage(uint8_t(128), msg_data);
+    }
+
+    // Test 2: New short IDs (168+) require version negotiation
+    {
+        // Old peer (v70238) - doesn't know about PLATFORMBAN short ID 168
+        V2TransportTester tester_old(true);
+        tester_old.GetTransport().SetPeerVersion(70238);
+
+        auto ret = tester_old.Interact();
+        BOOST_REQUIRE(ret && ret->empty());
+        tester_old.SendKey();
+        tester_old.SendGarbage();
+        tester_old.ReceiveKey();
+        tester_old.SendGarbageTerm();
+        tester_old.SendVersion();
+        ret = tester_old.Interact();
+        BOOST_REQUIRE(ret && ret->empty());
+        tester_old.ReceiveGarbage();
+        tester_old.ReceiveVersion();
+
+        // Old peer gets long encoding for PLATFORMBAN
+        auto msg_data_old = g_insecure_rand_ctx.randbytes<uint8_t>(100);
+        tester_old.AddMessage("platformban", msg_data_old);
+        ret = tester_old.Interact();
+        BOOST_REQUIRE(ret && ret->empty());
+        tester_old.ReceiveMessage("platformban", msg_data_old); // long encoding
+
+        // New peer (v70240) - knows about PLATFORMBAN short ID 168
+        V2TransportTester tester_new(true);
+        // Uses PROTOCOL_VERSION (70240) by default
+
+        ret = tester_new.Interact();
+        BOOST_REQUIRE(ret && ret->empty());
+        tester_new.SendKey();
+        tester_new.SendGarbage();
+        tester_new.ReceiveKey();
+        tester_new.SendGarbageTerm();
+        tester_new.SendVersion();
+        ret = tester_new.Interact();
+        BOOST_REQUIRE(ret && ret->empty());
+        tester_new.ReceiveGarbage();
+        tester_new.ReceiveVersion();
+
+        // New peer gets short encoding for PLATFORMBAN
+        auto msg_data_new = g_insecure_rand_ctx.randbytes<uint8_t>(100);
+        tester_new.AddMessage("platformban", msg_data_new);
+        ret = tester_new.Interact();
+        BOOST_REQUIRE(ret && ret->empty());
+        tester_new.ReceiveMessage(uint8_t(168), msg_data_new); // short encoding
     }
 }
 

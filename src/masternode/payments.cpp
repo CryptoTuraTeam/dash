@@ -1,11 +1,10 @@
-// Copyright (c) 2014-2024 The Dash Core developers
+// Copyright (c) 2014-2025 The Dash Core developers
 // Distributed under the MIT/X11 software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <masternode/payments.h>
 
 #include <chain.h>
-#include <chainparams.h>
 #include <consensus/amount.h>
 #include <deploymentstatus.h>
 #include <evo/deterministicmns.h>
@@ -41,7 +40,9 @@ CAmount PlatformShare(const CAmount reward)
     bool fV20Active = DeploymentActiveAfter(pindexPrev, m_consensus_params, Consensus::DEPLOYMENT_V20);
     CAmount masternodeReward = GetMasternodePayment(nBlockHeight, blockSubsidy + feeReward, fV20Active);
 
-    if (DeploymentActiveAfter(pindexPrev, m_consensus_params, Consensus::DEPLOYMENT_MN_RR)) {
+    // Credit Pool doesn't exist before V20. If any part of reward will re-allocated to credit pool before v20
+    // activation these fund will be just permanently lost. Applicable for devnets, regtest, testnet
+    if (fV20Active && DeploymentActiveAfter(pindexPrev, m_consensus_params, Consensus::DEPLOYMENT_MN_RR)) {
         CAmount masternodeSubsidyReward = GetMasternodePayment(nBlockHeight, blockSubsidy, fV20Active);
         const CAmount platformReward = PlatformShare(masternodeSubsidyReward);
         masternodeReward -= platformReward;
@@ -124,10 +125,14 @@ CAmount PlatformShare(const CAmount reward)
     for (const auto& txout : voutMasternodePayments) {
         bool found = ranges::any_of(txNew.vout, [&txout](const auto& txout2) {return txout == txout2;});
         if (!found) {
-            CTxDestination dest;
-            if (!ExtractDestination(txout.scriptPubKey, dest))
-                assert(false);
-            LogPrintf("CMNPaymentsProcessor::%s -- ERROR! Failed to find expected payee %s in block at height %s\n", __func__, EncodeDestination(dest), nBlockHeight);
+            std::string str_payout;
+            if (CTxDestination dest; ExtractDestination(txout.scriptPubKey, dest)) {
+                str_payout = "address=" + EncodeDestination(dest);
+            } else {
+                str_payout = "scriptPubKey=" + HexStr(txout.scriptPubKey);
+            }
+            LogPrintf("CMNPaymentsProcessor::%s -- ERROR! Failed to find expected payee %s amount=%lld height=%d\n",
+                      __func__, str_payout, txout.nValue, nBlockHeight);
             return false;
         }
     }

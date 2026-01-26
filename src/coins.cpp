@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2020 The Bitcoin Core developers
+// Copyright (c) 2012-2021 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -356,7 +356,7 @@ bool CCoinsViewErrorCatcher::GetCoin(const COutPoint &outpoint, Coin &coin) cons
     try {
         return CCoinsViewBacked::GetCoin(outpoint, coin);
     } catch(const std::runtime_error& e) {
-        for (auto f : m_err_callbacks) {
+        for (const auto& f : m_err_callbacks) {
             f();
         }
         LogPrintf("Error reading from database: %s\n", e.what());

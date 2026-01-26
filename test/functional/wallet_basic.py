@@ -15,6 +15,7 @@ from test_framework.util import (
     assert_greater_than,
     assert_raises_rpc_error,
     count_bytes,
+    find_vout_for_address,
 )
 from test_framework.wallet_util import test_address
 
@@ -27,11 +28,11 @@ class WalletTest(BitcoinTestFramework):
         self.num_nodes = 4
         if self.options.descriptors:
             self.extra_args = [[
-                "-acceptnonstdtxn=1"
+                "-dustrelayfee=0", "-walletrejectlongchains=0", "-whitelist=noban@127.0.0.1"
             ] for i in range(self.num_nodes)]
         else:
             self.extra_args = [[
-                "-acceptnonstdtxn=1",
+                "-dustrelayfee=0", "-walletrejectlongchains=0", "-whitelist=noban@127.0.0.1",
                 '-usehd={:d}'.format(i%2==0)
             ] for i in range(self.num_nodes)]
         self.setup_clean_chain = True
@@ -151,7 +152,7 @@ class WalletTest(BitcoinTestFramework):
         self.nodes[2].lockunspent(False, [unspent_0], True)
 
         # Restarting the node with the lock written to the wallet should keep the lock
-        self.restart_node(2)
+        self.restart_node(2, ["-walletrejectlongchains=0"])
         assert_raises_rpc_error(-8, "Invalid parameter, output already locked", self.nodes[2].lockunspent, False, [unspent_0])
 
         # Unloading and reloading the wallet with a persistent lock should keep the lock
@@ -452,7 +453,7 @@ class WalletTest(BitcoinTestFramework):
         assert_raises_rpc_error(-3, "Invalid amount", self.nodes[0].sendtoaddress, self.nodes[2].getnewaddress(), "1f-4")
 
         # This will raise an exception since generate does not accept a string
-        assert_raises_rpc_error(-1, "not an integer", self.generate, self.nodes[0], "2")
+        assert_raises_rpc_error(-3, "not of expected type number", self.generate, self.nodes[0], "2")
 
         if not self.options.descriptors:
 
@@ -485,6 +486,9 @@ class WalletTest(BitcoinTestFramework):
             # 1. Send some coins to generate new UTXO
             address_to_import = self.nodes[2].getnewaddress()
             txid = self.nodes[0].sendtoaddress(address_to_import, 1)
+            self.sync_mempools(self.nodes[0:3])
+            vout = find_vout_for_address(self.nodes[2], txid, address_to_import)
+            self.nodes[2].lockunspent(False, [{"txid": txid, "vout": vout}])
             self.generate(self.nodes[0], 1, sync_fun=lambda: self.sync_all(self.nodes[0:3]))
 
             self.log.info("Test sendtoaddress with fee_rate param (explicit fee rate in duff/B)")
@@ -510,7 +514,6 @@ class WalletTest(BitcoinTestFramework):
             txid = self.nodes[2].sendtoaddress(address=address, amount=amount, fee_rate=str(fee_rate_sat_vb))
             tx_size = self.get_vsize(self.nodes[2].gettransaction(txid)['hex'])
             self.generate(self.nodes[0], 1, sync_fun=lambda: self.sync_all(self.nodes[0:3]))
-            self.sync_all(self.nodes[0:3])
             postbalance = self.nodes[2].getbalance()
             fee = prebalance - postbalance - amount
             # TODO: remove workaround after bitcoin/bitcoin#22949 done
@@ -605,7 +608,7 @@ class WalletTest(BitcoinTestFramework):
             self.log.info("Test " + m)
             self.stop_nodes()
             # set lower ancestor limit for later
-            self.start_node(0, [m, "-limitancestorcount=" + str(chainlimit)])
+            self.start_node(0, [m, "-walletrejectlongchains=0", "-limitancestorcount=" + str(chainlimit)])
             self.start_node(1, [m, "-limitancestorcount=" + str(chainlimit)])
             self.start_node(2, [m, "-limitancestorcount=" + str(chainlimit)])
             if m == '-reindex':
@@ -653,7 +656,7 @@ class WalletTest(BitcoinTestFramework):
         total_txs = len(self.nodes[0].listtransactions("*", 99999))
 
         # Try with walletrejectlongchains
-        # Double chain limit but require combining inputs, so we pass SelectCoinsMinConf
+        # Double chain limit but require combining inputs, so we pass AttemptSelection
         self.stop_node(0)
         extra_args = ["-walletrejectlongchains", "-limitancestorcount=" + str(2 * chainlimit)]
         self.start_node(0, extra_args=extra_args)
@@ -685,7 +688,7 @@ class WalletTest(BitcoinTestFramework):
         self.generate(self.nodes[0], 1, sync_fun=self.no_op)
         destination = self.nodes[1].getnewaddress()
         txid = self.nodes[0].sendtoaddress(destination, 0.123)
-        tx = self.nodes[0].decoderawtransaction(self.nodes[0].gettransaction(txid)['hex'])
+        tx = self.nodes[0].gettransaction(txid=txid, verbose=True)['decoded']
         output_addresses = [vout['scriptPubKey']['address'] for vout in tx["vout"]]
         assert len(output_addresses) > 1
         for address in output_addresses:
@@ -707,8 +710,7 @@ class WalletTest(BitcoinTestFramework):
                                  "vout":     baz["vout"]}
         expected_fields = frozenset({'amount', 'chainlock', 'confirmations', 'details', 'fee',
                                      'instantlock', 'instantlock_internal',
-                                     'hex', 'timereceived', 'time', 'trusted', 'txid', 'walletconflicts'})
-
+                                     'hex', 'lastprocessedblock', 'timereceived', 'time', 'trusted', 'txid', 'walletconflicts'})
         verbose_field = "decoded"
         expected_verbose_fields = expected_fields | {verbose_field}
 

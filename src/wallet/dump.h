@@ -10,11 +10,14 @@
 #include <string>
 #include <vector>
 
-class CWallet;
-
 struct bilingual_str;
+class ArgsManager;
 
-bool DumpWallet(CWallet& wallet, bilingual_str& error);
-bool CreateFromDump(const std::string& name, const fs::path& wallet_path, bilingual_str& error, std::vector<bilingual_str>& warnings);
+namespace wallet {
+class WalletDatabase;
+
+bool DumpWallet(const ArgsManager& args, WalletDatabase& db, bilingual_str& error);
+bool CreateFromDump(const ArgsManager& args, const std::string& name, const fs::path& wallet_path, bilingual_str& error, std::vector<bilingual_str>& warnings);
+} // namespace wallet
 
 #endif // BITCOIN_WALLET_DUMP_H

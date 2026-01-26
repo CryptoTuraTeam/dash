@@ -1,9 +1,13 @@
-// Copyright (c) 2011-2020 The Bitcoin Core developers
+// Copyright (c) 2011-2021 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #ifndef BITCOIN_QT_RPCCONSOLE_H
 #define BITCOIN_QT_RPCCONSOLE_H
+
+#if defined(HAVE_CONFIG_H)
+#include <config/bitcoin-config.h>
+#endif
 
 #include <qt/guiutil.h>
 #include <qt/peertablemodel.h>
@@ -18,7 +22,9 @@
 #include <QWidget>
 
 class ClientModel;
+class RPCExecutor;
 class RPCTimerInterface;
+class WalletController;
 class WalletModel;
 
 namespace interfaces {
@@ -51,8 +57,12 @@ public:
     }
 
     void setClientModel(ClientModel *model = nullptr, int bestblock_height = 0, int64_t bestblock_date = 0, uint256 bestblock_hash = uint256(), double verification_progress = 0.0);
-    void addWallet(WalletModel * const walletModel);
+
+#ifdef ENABLE_WALLET
+    void setWalletController(WalletController* wallet_controller);
+    void addWallet(WalletModel* const walletModel);
     void removeWallet(WalletModel* const walletModel);
+#endif // ENABLE_WALLET
 
     enum MessageClass {
         MC_ERROR,
@@ -109,10 +119,12 @@ public Q_SLOTS:
     void fontSmaller();
     void setFontSize(int newSize);
 
-    /** Wallet repair options */
+    /** Repair options */
+    void walletReindex();
+#ifdef ENABLE_WALLET
     void walletRescan1();
     void walletRescan2();
-    void walletReindex();
+#endif // ENABLE_WALLET
 
     /** Append the message to the message widget */
     void message(int category, const QString &msg) { message(category, msg, false); }
@@ -128,7 +140,7 @@ public Q_SLOTS:
     /** Set number of blocks, last block date and last block hash shown in the UI */
     void setNumBlocks(int count, const QDateTime& blockDate, const QString& blockHash, double nVerificationProgress, bool headers);
     /** Set size (number of transactions and memory usage) of the mempool in the UI */
-    void setMempoolSize(long numberOfTxs, size_t dynUsage);
+    void setMempoolSize(long numberOfTxs, size_t dynUsage, size_t maxUsage);
     /** Set number of InstantSend locks */
     void setInstantSendLockCount(size_t count);
     /** Go forward or back in history */
@@ -143,10 +155,12 @@ public Q_SLOTS:
     void unbanSelectedNode();
     /** set which tab has the focus (is visible) */
     void setTabFocus(enum TabTypes tabType);
+#ifdef ENABLE_WALLET
+    /** Set the current (ie - active) wallet */
+    void setCurrentWallet(WalletModel* const wallet_model);
+#endif // ENABLE_WALLET
 
 Q_SIGNALS:
-    // For RPC command executor
-    void cmdRequest(const QString &command, const WalletModel* wallet_model);
     /** Get restart command-line parameters and handle restart */
     void handleRestart(QStringList args);
 
@@ -164,6 +178,12 @@ private:
     void setButtonIcons();
     /** Reload some themes related widgets */
     void reloadThemedWidgets();
+#ifdef ENABLE_WALLET
+    /** Initiate a wallet rescan */
+    void walletRescan(bool from_genesis);
+    /** Update wallet UI when selected wallet changes */
+    void onWalletChanged();
+#endif // ENABLE_WALLET
 
     enum ColumnWidths
     {
@@ -178,6 +198,7 @@ private:
     interfaces::Node& m_node;
     Ui::RPCConsole* const ui;
     ClientModel *clientModel = nullptr;
+    WalletController* m_wallet_controller{nullptr};
     QButtonGroup* pageButtons = nullptr;
     QStringList history;
     int historyPtr = 0;
@@ -189,6 +210,7 @@ private:
     int consoleFontSize = 0;
     QCompleter *autoCompleter = nullptr;
     QThread thread;
+    RPCExecutor* m_executor{nullptr};
     WalletModel* m_last_wallet_model{nullptr};
     bool m_is_executing{false};
     QByteArray m_peer_widget_header_state;

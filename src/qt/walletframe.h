@@ -1,4 +1,4 @@
-// Copyright (c) 2011-2020 The Bitcoin Core developers
+// Copyright (c) 2011-2021 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -37,7 +37,7 @@ public:
 
     void setClientModel(ClientModel *clientModel);
 
-    bool addWallet(WalletModel* walletModel, WalletView* walletView);
+    bool addView(WalletView* walletView);
     void setCurrentWallet(WalletModel* wallet_model);
     void removeWallet(WalletModel* wallet_model);
     void removeAllWallets();
@@ -100,6 +100,8 @@ public Q_SLOTS:
     void backupWallet();
     /** Change encrypted wallet passphrase */
     void changePassphrase();
+    /** Show wallet mnemonic/recovery phrase */
+    void showMnemonic();
     /** Ask for passphrase to unlock wallet temporarily */
     void unlockWallet();
     /** Lock wallet */

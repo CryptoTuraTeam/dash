@@ -1,6 +1,6 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2020 The Bitcoin Core developers
-// Copyright (c) 2014-2025 The Dash Core developers
+// Copyright (c) 2009-2021 The Bitcoin Core developers
+// Copyright (c) 2014-2026 The Dash Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -19,7 +19,6 @@
 #include <context.h>
 #include <consensus/amount.h>
 #include <deploymentstatus.h>
-#include <node/coinstats.h>
 #include <fs.h>
 #include <hash.h>
 #include <httpserver.h>
@@ -29,7 +28,10 @@
 #include <index/blockfilterindex.h>
 #include <index/coinstatsindex.h>
 #include <index/txindex.h>
+#include <interfaces/init.h>
 #include <interfaces/node.h>
+#include <interfaces/wallet.h>
+#include <kernel/coinstats.h>
 #include <mapport.h>
 #include <node/miner.h>
 #include <net.h>
@@ -42,6 +44,7 @@
 #include <node/chainstate.h>
 #include <node/context.h>
 #include <node/interface_ui.h>
+#include <node/sync_manager.h>
 #include <node/txreconciliation.h>
 #include <policy/feerate.h>
 #include <policy/fees.h>
@@ -60,7 +63,6 @@
 #include <torcontrol.h>
 #include <txdb.h>
 #include <txmempool.h>
-#include <txorphanage.h>
 #include <util/asmap.h>
 #include <util/error.h>
 #include <util/moneystr.h>
@@ -75,22 +77,29 @@
 #include <validationinterface.h>
 #include <walletinitinterface.h>
 
+#include <active/context.h>
+#include <active/masternode.h>
 #include <bls/bls.h>
 #include <coinjoin/coinjoin.h>
-#include <coinjoin/context.h>
 #include <coinjoin/server.h>
+#include <coinjoin/walletman.h>
 #include <dsnotificationinterface.h>
+#include <evo/chainhelper.h>
 #include <evo/deterministicmns.h>
 #include <evo/evodb.h>
 #include <evo/mnhftx.h>
+#include <evo/specialtxman.h>
 #include <flat-database.h>
 #include <governance/governance.h>
+#include <governance/net_governance.h>
+#include <instantsend/instantsend.h>
+#include <instantsend/net_instantsend.h>
 #include <llmq/context.h>
 #include <llmq/dkgsessionmgr.h>
+#include <llmq/net_signing.h>
 #include <llmq/options.h>
-#include <llmq/signing.h>
+#include <llmq/observer/context.h>
 #include <masternode/meta.h>
-#include <masternode/node.h>
 #include <masternode/sync.h>
 #include <masternode/utils.h>
 #include <messagesigner.h>
@@ -117,7 +126,6 @@
 #include <vector>
 
 #ifndef WIN32
-#include <attributes.h>
 #include <cerrno>
 #include <signal.h>
 #include <sys/stat.h>
@@ -130,6 +138,32 @@
 #include <zmq/zmqnotificationinterface.h>
 #include <zmq/zmqrpc.h>
 #endif
+
+using kernel::CoinStatsHashType;
+
+using node::CacheSizes;
+using node::CalculateCacheSizes;
+using node::ChainstateLoadingError;
+using node::ChainstateLoadVerifyError;
+using node::DashChainstateSetupClose;
+using node::DEFAULT_ADDRESSINDEX;
+using node::DEFAULT_PRINTPRIORITY;
+using node::DEFAULT_SPENTINDEX;
+using node::DEFAULT_STOPAFTERBLOCKIMPORT;
+using node::DEFAULT_TIMESTAMPINDEX;
+using node::LoadChainstate;
+using node::NodeContext;
+using node::ThreadImport;
+using node::VerifyLoadedChainstate;
+using node::fAddressIndex;
+using node::fPruneMode;
+using node::fReindex;
+using node::fSpentIndex;
+using node::fTimestampIndex;
+using node::nPruneTarget;
+#ifdef ENABLE_WALLET
+using wallet::DEFAULT_DISABLE_WALLET;
+#endif // ENABLE_WALLET
 
 static constexpr bool DEFAULT_PROXYRANDOMIZE{true};
 static constexpr bool DEFAULT_REST_ENABLE{false};
@@ -195,15 +229,34 @@ static fs::path GetPidFile(const ArgsManager& args)
 // shutdown thing.
 //
 
+#if HAVE_SYSTEM
+static void ShutdownNotify(const ArgsManager& args)
+{
+    std::vector<std::thread> threads;
+    for (const auto& cmd : args.GetArgs("-shutdownnotify")) {
+        threads.emplace_back(runCommand, cmd);
+    }
+    for (auto& t : threads) {
+        t.join();
+    }
+}
+#endif
+
 void Interrupt(NodeContext& node)
 {
+#if HAVE_SYSTEM
+    ShutdownNotify(*node.args);
+#endif
     InterruptHTTPServer();
     InterruptHTTPRPC();
     InterruptRPC();
     InterruptREST();
     InterruptTorControl();
-    if (node.llmq_ctx) {
-        node.llmq_ctx->Interrupt();
+    if (node.active_ctx) {
+        node.active_ctx->Interrupt();
+    }
+    if (node.peerman) {
+        node.peerman->InterruptHandlers();
     }
     InterruptMapPort();
     if (node.connman)
@@ -237,6 +290,10 @@ void PrepareShutdown(NodeContext& node)
     StopREST();
     StopRPC();
     StopHTTPServer();
+
+    if (node.observer_ctx) node.observer_ctx->Stop();
+    if (node.active_ctx) node.active_ctx->Stop();
+    if (node.peerman) node.peerman->StopHandlers();
     if (node.llmq_ctx) node.llmq_ctx->Stop();
 
     for (const auto& client : node.chain_clients) {
@@ -291,8 +348,27 @@ void PrepareShutdown(NodeContext& node)
     // CValidationInterface callbacks, flush them...
     GetMainSignals().FlushBackgroundCallbacks();
 
+    if (node.observer_ctx) {
+        UnregisterValidationInterface(node.observer_ctx.get());
+    }
+
+    if (node.active_ctx) {
+        UnregisterValidationInterface(node.active_ctx.get());
+    }
+
+    if (node.cj_walletman) {
+        UnregisterValidationInterface(node.cj_walletman.get());
+    }
+
+    if (g_ds_notification_interface) {
+        UnregisterValidationInterface(g_ds_notification_interface.get());
+        g_ds_notification_interface.reset();
+    }
+
     // After all scheduled tasks have been flushed, destroy pointers
     // and reset all to nullptr.
+    node.observer_ctx.reset();
+    node.active_ctx.reset();
     node.mn_sync.reset();
     node.sporkman.reset();
     node.govman.reset();
@@ -341,21 +417,12 @@ void PrepareShutdown(NodeContext& node)
     }
 #endif
 
-    if (g_ds_notification_interface) {
-        UnregisterValidationInterface(g_ds_notification_interface.get());
-        g_ds_notification_interface.reset();
-    }
-
-    if (node.mn_activeman) {
-        UnregisterValidationInterface(node.mn_activeman.get());
-        node.mn_activeman.reset();
-    }
-
     node.chain_clients.clear();
 
     // After all wallets are removed, destroy all CoinJoin objects
     // and reset them to nullptr
-    node.cj_ctx.reset();
+    node.cj_walletman.reset();
+    node.dstxman.reset();
 
     UnregisterAllValidationInterfaces();
     GetMainSignals().UnregisterBackgroundSignalScheduler();
@@ -398,7 +465,6 @@ void Shutdown(NodeContext& node)
         LogPrintf("%s: Unable to remove PID file: %s\n", __func__, fsbridge::get_filesystem_error_message(e));
     }
 
-    node.args = nullptr;
     LogPrintf("%s: done\n", __func__);
 }
 
@@ -451,21 +517,6 @@ static void OnRPCStopped()
     LogPrint(BCLog::RPC, "RPC stopped.\n");
 }
 
-std::string GetSupportedSocketEventsStr()
-{
-    std::string strSupportedModes = "'select'";
-#ifdef USE_POLL
-    strSupportedModes += ", 'poll'";
-#endif
-#ifdef USE_EPOLL
-    strSupportedModes += ", 'epoll'";
-#endif
-#ifdef USE_KQUEUE
-    strSupportedModes += ", 'kqueue'";
-#endif
-    return strSupportedModes;
-}
-
 void SetupServerArgs(ArgsManager& argsman)
 {
     SetupHelpOptions(argsman);
@@ -475,9 +526,11 @@ void SetupServerArgs(ArgsManager& argsman)
 
     const auto defaultBaseParams = CreateBaseChainParams(CBaseChainParams::MAIN);
     const auto testnetBaseParams = CreateBaseChainParams(CBaseChainParams::TESTNET);
+    const auto devnetBaseParams = CreateBaseChainParams(CBaseChainParams::DEVNET);
     const auto regtestBaseParams = CreateBaseChainParams(CBaseChainParams::REGTEST);
     const auto defaultChainParams = CreateChainParams(argsman, CBaseChainParams::MAIN);
     const auto testnetChainParams = CreateChainParams(argsman, CBaseChainParams::TESTNET);
+    const auto devnetChainParams = CreateChainParams(argsman, CBaseChainParams::DEVNET);
     const auto regtestChainParams = CreateChainParams(argsman, CBaseChainParams::REGTEST);
 
     // Hidden Options
@@ -491,9 +544,10 @@ void SetupServerArgs(ArgsManager& argsman)
 #if HAVE_SYSTEM
     argsman.AddArg("-alertnotify=<cmd>", "Execute command when an alert is raised (%s in cmd is replaced by message)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
 #endif
-    argsman.AddArg("-assumevalid=<hex>", strprintf("If this block is in the chain assume that it and its ancestors are valid and potentially skip their script verification (0 to verify all, default: %s, testnet: %s)", defaultChainParams->GetConsensus().defaultAssumeValid.GetHex(), testnetChainParams->GetConsensus().defaultAssumeValid.GetHex()), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-assumevalid=<hex>", strprintf("If this block is in the chain assume that it and its ancestors are valid and potentially skip their script verification (0 to verify all, default: %s, testnet: %s, devnet: %s)", defaultChainParams->GetConsensus().defaultAssumeValid.GetHex(), testnetChainParams->GetConsensus().defaultAssumeValid.GetHex(), devnetChainParams->GetConsensus().defaultAssumeValid.GetHex()), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-blocksdir=<dir>", "Specify directory to hold blocks subdirectory for *.dat files (default: <datadir>)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-fastprune", "Use smaller block files and lower minimum prune height for testing purposes", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
+    argsman.AddArg("-tinyblk", "Use smaller block files for testing purposes", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
 #if HAVE_SYSTEM
     argsman.AddArg("-blocknotify=<cmd>", "Execute command when the best block changes (%s in cmd is replaced by block hash)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
 #endif
@@ -503,7 +557,7 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-chainlocknotify=<cmd>", "Execute command when the best chainlock changes (%s in cmd is replaced by chainlocked block hash)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
 #endif
     argsman.AddArg("-coinstatsindex", strprintf("Maintain coinstats index used by the gettxoutsetinfo RPC (default: %u)", DEFAULT_COINSTATSINDEX), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-conf=<file>", strprintf("Specify path to read-only configuration file. Relative paths will be prefixed by datadir location. (default: %s)", BITCOIN_CONF_FILENAME), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-conf=<file>", strprintf("Specify path to read-only configuration file. Relative paths will be prefixed by datadir location (only useable from command line, not configuration file) (default: %s)", BITCOIN_CONF_FILENAME), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-datadir=<dir>", "Specify data directory", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-dbbatchsize", strprintf("Maximum database write batch size in bytes (default: %u)", nDefaultDbBatchSize), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
     argsman.AddArg("-dbcache=<n>", strprintf("Maximum database cache size <n> MiB (%d to %d, default: %d). In addition, unused mempool memory is shared for this cache (see -maxmempool).", nMinDbCache, nMaxDbCache, nDefaultDbCache), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -513,9 +567,11 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-maxorphantxsize=<n>", strprintf("Maximum total size of all orphan transactions in megabytes (default: %u)", DEFAULT_MAX_ORPHAN_TRANSACTIONS_SIZE), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-maxrecsigsage=<n>", strprintf("Number of seconds to keep LLMQ recovery sigs (default: %u)", llmq::DEFAULT_MAX_RECOVERED_SIGS_AGE), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-mempoolexpiry=<n>", strprintf("Do not keep transactions in the mempool longer than <n> hours (default: %u)", DEFAULT_MEMPOOL_EXPIRY), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-minimumchainwork=<hex>", strprintf("Minimum work assumed to exist on a valid chain in hex (default: %s, testnet: %s)", defaultChainParams->GetConsensus().nMinimumChainWork.GetHex(), testnetChainParams->GetConsensus().nMinimumChainWork.GetHex()), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-minimumchainwork=<hex>", strprintf("Minimum work assumed to exist on a valid chain in hex (default: %s, testnet: %s, devnet: %s)", defaultChainParams->GetConsensus().nMinimumChainWork.GetHex(), testnetChainParams->GetConsensus().nMinimumChainWork.GetHex(), devnetChainParams->GetConsensus().nMinimumChainWork.GetHex()), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
     argsman.AddArg("-par=<n>", strprintf("Set the number of script verification threads (%u to %d, 0 = auto, <0 = leave that many cores free, default: %d)",
         -GetNumCores(), MAX_SCRIPTCHECK_THREADS, DEFAULT_SCRIPTCHECK_THREADS), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-parbls=<n>", strprintf("Set the number of BLS verification threads (%u to %d, 0 = auto, <0 = leave that many cores free, default: %d)",
+        -GetNumCores(), llmq::MAX_BLSCHECK_THREADS, llmq::DEFAULT_BLSCHECK_THREADS), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-persistmempool", strprintf("Whether to save the mempool on shutdown and load on restart (default: %u)", DEFAULT_PERSIST_MEMPOOL), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-pid=<file>", strprintf("Specify pid file. Relative paths will be prefixed by a net-specific datadir location. (default: %s)", BITCOIN_PID_FILENAME), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-prune=<n>", strprintf("Reduce storage requirements by enabling pruning (deleting) of old blocks. This allows the pruneblockchain RPC to be called to delete specific blocks, and enables automatic pruning of old blocks if a target size in MiB is provided. This mode is incompatible with -txindex, -rescan and -disablegovernance=false. "
@@ -525,11 +581,7 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-syncmempool", strprintf("Sync mempool from other nodes on start (default: %u)", DEFAULT_SYNC_MEMPOOL), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
 #if HAVE_SYSTEM
     argsman.AddArg("-startupnotify=<cmd>", "Execute command on startup.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-#endif
-#ifndef WIN32
-    argsman.AddArg("-sysperms", "Create new files with system default permissions, instead of umask 077 (only effective with disabled wallet functionality)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-#else
-    hidden_args.emplace_back("-sysperms");
+    argsman.AddArg("-shutdownnotify=<cmd>", "Execute command immediately before beginning shutdown. The need for shutdown may be urgent, so be careful not to delay it long (if the command doesn't require interaction with the server, consider having it fork into the background).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
 #endif
     argsman.AddArg("-version", "Print version and exit", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
 
@@ -541,61 +593,65 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-txindex", strprintf("Maintain a full transaction index, used by the getrawtransaction rpc call (default: %u)", DEFAULT_TXINDEX), ArgsManager::ALLOW_ANY, OptionsCategory::INDEXING);
     argsman.AddArg("-blockfilterindex=<type>",
                  strprintf("Maintain an index of compact filters by block (default: %s, values: %s).", DEFAULT_BLOCKFILTERINDEX, ListBlockFilterTypes()) +
-                 " If <type> is not supplied or if <type> = 1, indexes for all known types are enabled.",
+                 " If <type> is not supplied or if <type> = 1, indexes for all known types are enabled." +
+                 " Automatically enabled for masternodes with value 'basic'.",
                  ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
 
     argsman.AddArg("-asmap=<file>", strprintf("Specify asn mapping used for bucketing of the peers (default: %s). Relative paths will be prefixed by the net-specific datadir location.", DEFAULT_ASMAP_FILENAME), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-addnode=<ip>", strprintf("Add a node to connect to and attempt to keep the connection open (see the addnode RPC help for more info). This option can be specified multiple times to add multiple nodes; connections are limited to %u at a time and are counted separately from the -maxconnections limit.", MAX_ADDNODE_CONNECTIONS), ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::CONNECTION);
     argsman.AddArg("-allowprivatenet", strprintf("Allow RFC1918 addresses to be relayed and connected to (default: %u)", DEFAULT_ALLOWPRIVATENET), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-bantime=<n>", strprintf("Default duration (in seconds) of manually configured bans (default: %u)", DEFAULT_MISBEHAVING_BANTIME), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
-    argsman.AddArg("-bind=<addr>[:<port>][=onion]", strprintf("Bind to given address and always listen on it (default: 0.0.0.0). Use [host]:port notation for IPv6. Append =onion to tag any incoming connections to that address and port as incoming Tor connections (default: 127.0.0.1:%u=onion, testnet: 127.0.0.1:%u=onion, regtest: 127.0.0.1:%u=onion)", defaultBaseParams->OnionServiceTargetPort(), testnetBaseParams->OnionServiceTargetPort(), regtestBaseParams->OnionServiceTargetPort()), ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::CONNECTION);
+    argsman.AddArg("-bind=<addr>[:<port>][=onion]", strprintf("Bind to given address and always listen on it (default: 0.0.0.0). Use [host]:port notation for IPv6. Append =onion to tag any incoming connections to that address and port as incoming Tor connections (default: 127.0.0.1:%u=onion, testnet: 127.0.0.1:%u=onion, devnet: 127.0.0.1:%u=onion, regtest: 127.0.0.1:%u=onion)", defaultBaseParams->OnionServiceTargetPort(), testnetBaseParams->OnionServiceTargetPort(), devnetBaseParams->OnionServiceTargetPort(), regtestBaseParams->OnionServiceTargetPort()), ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::CONNECTION);
     argsman.AddArg("-cjdnsreachable", "If set, then this host is configured for CJDNS (connecting to fc00::/8 addresses would lead us to the CJDNS network, see doc/cjdns.md) (default: 0)", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-connect=<ip>", "Connect only to the specified node; -noconnect disables automatic connections (the rules for this peer are the same as for -addnode). This option can be specified multiple times to connect to multiple nodes.", ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::CONNECTION);
     argsman.AddArg("-discover", "Discover own IP addresses (default: 1 when listening and no -externalip or -proxy)", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-dns", strprintf("Allow DNS lookups for -addnode, -seednode and -connect (default: %u)", DEFAULT_NAME_LOOKUP), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
-    argsman.AddArg("-dnsseed", strprintf("Query for peer addresses via DNS lookup, if low on addresses (default: %u unless -connect used)", DEFAULT_DNSSEED), ArgsManager::ALLOW_BOOL, OptionsCategory::CONNECTION);
+    argsman.AddArg("-dnsseed", strprintf("Query for peer addresses via DNS lookup, if low on addresses (default: %u unless -connect used or -maxconnections=0)", DEFAULT_DNSSEED), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-externalip=<ip>", "Specify your own public address", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
-    argsman.AddArg("-fixedseeds", strprintf("Allow fixed seeds if DNS seeds don't provide peers (default: %u)", DEFAULT_FIXEDSEEDS), ArgsManager::ALLOW_BOOL, OptionsCategory::CONNECTION);
+    argsman.AddArg("-fixedseeds", strprintf("Allow fixed seeds if DNS seeds don't provide peers (default: %u)", DEFAULT_FIXEDSEEDS), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-forcednsseed", strprintf("Always query for peer addresses via DNS lookup (default: %u)", DEFAULT_FORCEDNSSEED), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
-    argsman.AddArg("-listen", strprintf("Accept connections from outside (default: %u if no -proxy or -connect)", DEFAULT_LISTEN), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
+    argsman.AddArg("-listen", strprintf("Accept connections from outside (default: %u if no -proxy, -connect or -maxconnections=0)", DEFAULT_LISTEN), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-listenonion", strprintf("Automatically create Tor onion service (default: %d)", DEFAULT_LISTEN_ONION), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-maxconnections=<n>", strprintf("Maintain at most <n> connections to peers (temporary service connections excluded) (default: %u). This limit does not apply to connections manually added via -addnode or the addnode RPC, which have a separate limit of %u.", DEFAULT_MAX_PEER_CONNECTIONS, MAX_ADDNODE_CONNECTIONS), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-maxreceivebuffer=<n>", strprintf("Maximum per-connection receive buffer, <n>*1000 bytes (default: %u)", DEFAULT_MAXRECEIVEBUFFER), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-maxsendbuffer=<n>", strprintf("Maximum per-connection memory usage for the send buffer, <n>*1000 bytes (default: %u)", DEFAULT_MAXSENDBUFFER), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-maxtimeadjustment", strprintf("Maximum allowed median peer time offset adjustment. Local perspective of time may be influenced by outbound peers forward or backward by this amount (default: %u seconds).", DEFAULT_MAX_TIME_ADJUSTMENT), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-maxuploadtarget=<n>", strprintf("Tries to keep outbound traffic under the given target per 24h. Limit does not apply to peers with 'download' permission or blocks created within past week. 0 = no limit (default: %s). Optional suffix units [k|K|m|M|g|G|t|T] (default: M). Lowercase is 1000 base while uppercase is 1024 base", DEFAULT_MAX_UPLOAD_TARGET), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
+#if HAVE_SOCKADDR_UN
+    argsman.AddArg("-onion=<ip:port|path>", "Use separate SOCKS5 proxy to reach peers via Tor onion services, set -noonion to disable (default: -proxy). May be a local file path prefixed with 'unix:'.", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
+#else
     argsman.AddArg("-onion=<ip:port>", "Use separate SOCKS5 proxy to reach peers via Tor onion services, set -noonion to disable (default: -proxy)", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
+#endif
     argsman.AddArg("-i2psam=<ip:port>", "I2P SAM proxy to reach I2P peers and accept I2P connections (default: none)", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-i2pacceptincoming", strprintf("Whether to accept inbound I2P connections (default: %i). Ignored if -i2psam is not set. Listening for inbound I2P connections is done through the SAM proxy, not by binding to a local address and port.", DEFAULT_I2P_ACCEPT_INCOMING), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-onlynet=<net>", "Make automatic outbound connections only to network <net> (" + Join(GetNetworkNames(), ", ") + "). Inbound and manual connections are not affected by this option. It can be specified multiple times to allow multiple networks.", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-v2transport", strprintf("Support v2 transport (default: %u)", DEFAULT_V2_TRANSPORT), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
-    argsman.AddArg("-peerblockfilters", strprintf("Serve compact block filters to peers per BIP 157 (default: %u)", DEFAULT_PEERBLOCKFILTERS), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
+    argsman.AddArg("-peerblockfilters", strprintf("Serve compact block filters to peers per BIP 157 (default: %u, automatically enabled for masternodes)", DEFAULT_PEERBLOCKFILTERS), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-peerbloomfilters", strprintf("Support filtering of blocks and transaction with bloom filters (default: %u)", DEFAULT_PEERBLOOMFILTERS), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-txreconciliation", strprintf("Enable transaction reconciliations per BIP 330 (default: %d)", DEFAULT_TXRECONCILIATION_ENABLE), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CONNECTION);
     argsman.AddArg("-peertimeout=<n>", strprintf("Specify a p2p connection timeout delay in seconds. After connecting to a peer, wait this amount of time before considering disconnection based on inactivity (minimum: 1, default: %d)", DEFAULT_PEER_CONNECT_TIMEOUT), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
-    argsman.AddArg("-permitbaremultisig", strprintf("Relay non-P2SH multisig (default: %u)", DEFAULT_PERMIT_BAREMULTISIG), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     // TODO: remove the sentence "Nodes not using ... incoming connections." once the changes from
     // https://github.com/bitcoin/bitcoin/pull/23542 have become widespread.
-    argsman.AddArg("-port=<port>", strprintf("Listen for connections on <port>. Nodes not using the default ports (default: %u, testnet: %u, regtest: %u) are unlikely to get incoming connections. Not relevant for I2P (see doc/i2p.md).", defaultChainParams->GetDefaultPort(), testnetChainParams->GetDefaultPort(), regtestChainParams->GetDefaultPort()), ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::CONNECTION);
+    argsman.AddArg("-port=<port>", strprintf("Listen for connections on <port>. Nodes not using the default ports (default: %u, testnet: %u, devnet: %u, regtest: %u) are unlikely to get incoming connections. Not relevant for I2P (see doc/i2p.md).", defaultChainParams->GetDefaultPort(), testnetChainParams->GetDefaultPort(), devnetChainParams->GetDefaultPort(), regtestChainParams->GetDefaultPort()), ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::CONNECTION);
+#if HAVE_SOCKADDR_UN
+    argsman.AddArg("-proxy=<ip:port|path>", "Connect through SOCKS5 proxy, set -noproxy to disable (default: disabled). May be a local file path prefixed with 'unix:' if the proxy supports it.", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_ELISION, OptionsCategory::CONNECTION);
+#else
     argsman.AddArg("-proxy=<ip:port>", "Connect through SOCKS5 proxy, set -noproxy to disable (default: disabled)", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_ELISION, OptionsCategory::CONNECTION);
+#endif
     argsman.AddArg("-proxyrandomize", strprintf("Randomize credentials for every proxy connection. This enables Tor stream isolation (default: %u)", DEFAULT_PROXYRANDOMIZE), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-seednode=<ip>", "Connect to a node to retrieve peer addresses, and disconnect. This option can be specified multiple times to connect to multiple nodes.", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-socketevents=<mode>", "Socket events mode, which must be one of 'select', 'poll', 'epoll' or 'kqueue', depending on your system (default: Linux - 'epoll', FreeBSD/Apple - 'kqueue', Windows - 'select')", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
-    argsman.AddArg("-networkactive", "Enable all P2P network activity (default: 1). Can be changed by the setnetworkactive RPC command", ArgsManager::ALLOW_BOOL, OptionsCategory::CONNECTION);
+    argsman.AddArg("-networkactive", "Enable all P2P network activity (default: 1). Can be changed by the setnetworkactive RPC command", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-timeout=<n>", strprintf("Specify socket connection timeout in milliseconds. If an initial attempt to connect is unsuccessful after this amount of time, drop it (minimum: 1, default: %d)", DEFAULT_CONNECT_TIMEOUT), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
-    argsman.AddArg("-torcontrol=<ip>:<port>", strprintf("Tor control port to use if onion listening enabled (default: %s)", DEFAULT_TOR_CONTROL), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
+    argsman.AddArg("-torcontrol=<ip>:<port>", strprintf("Tor control host and port to use if onion listening enabled (default: %s). If no port is specified, the default port of %i will be used.", DEFAULT_TOR_CONTROL, DEFAULT_TOR_CONTROL_PORT), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-torpassword=<pass>", "Tor control port password (default: empty)", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::CONNECTION);
 #ifdef USE_UPNP
-#if USE_UPNP
-    argsman.AddArg("-upnp", "Use UPnP to map the listening port (default: 1 when listening and no -proxy)", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
-#else
-    argsman.AddArg("-upnp", strprintf("Use UPnP to map the listening port (default: %u)", 0), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
-#endif
+    argsman.AddArg("-upnp", strprintf("Use UPnP to map the listening port (default: %u)", DEFAULT_UPNP), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
 #else
     hidden_args.emplace_back("-upnp");
 #endif
 #ifdef USE_NATPMP
-    argsman.AddArg("-natpmp", strprintf("Use NAT-PMP to map the listening port (default: %s)", DEFAULT_NATPMP ? "1 when listening and no -proxy" : "0"), ArgsManager::ALLOW_BOOL, OptionsCategory::CONNECTION);
+    argsman.AddArg("-natpmp", strprintf("Use NAT-PMP to map the listening port (default: %u)", DEFAULT_NATPMP), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
 #else
     hidden_args.emplace_back("-natpmp");
 #endif // USE_NATPMP
@@ -696,6 +752,7 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-checkmempool=<n>", strprintf("Run mempool consistency checks every <n> transactions. Use 0 to disable. (default: %u, regtest: %u)", defaultChainParams->DefaultConsistencyChecks(), regtestChainParams->DefaultConsistencyChecks()), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-checkpoints", strprintf("Enable rejection of any forks from the known historical chain until block %s (default: %u)", defaultChainParams->Checkpoints().GetHeight(), DEFAULT_CHECKPOINTS_ENABLED), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-deprecatedrpc=<method>", "Allows deprecated RPC method(s) to be used", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
+    argsman.AddArg("-forceevodbrepair", "Force evodb masternode list diff verification and repair on startup, even if already repaired (default: 0)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-limitancestorcount=<n>", strprintf("Do not accept transactions if number of in-mempool ancestors is <n> or more (default: %u)", DEFAULT_ANCESTOR_LIMIT), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-limitancestorsize=<n>", strprintf("Do not accept transactions whose size with all in-mempool ancestors exceeds <n> kilobytes (default: %u)", DEFAULT_ANCESTOR_SIZE_LIMIT), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-limitdescendantcount=<n>", strprintf("Do not accept transactions if any ancestor would have <n> or more in-mempool descendants (default: %u)", DEFAULT_DESCENDANT_LIMIT), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
@@ -703,7 +760,7 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-stopafterblockimport", strprintf("Stop running after importing blocks from disk (default: %u)", DEFAULT_STOPAFTERBLOCKIMPORT), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-stopatheight", strprintf("Stop running after reaching the given height in the main chain (default: %u)", DEFAULT_STOPATHEIGHT), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-watchquorums=<n>", strprintf("Watch and validate quorum communication (default: %u)", llmq::DEFAULT_WATCH_QUORUMS), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
-    argsman.AddArg("-capturemessages", "Capture all P2P messages to disk", ArgsManager::ALLOW_BOOL | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
+    argsman.AddArg("-capturemessages", "Capture all P2P messages to disk", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-disablegovernance", strprintf("Disable governance validation (0-1, default: %u)", 0), ArgsManager::ALLOW_ANY, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-maxsigcachesize=<n>", strprintf("Limit sum of signature cache and script execution cache sizes to <n> MiB (default: %u)", DEFAULT_MAX_SIG_CACHE_SIZE), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-maxtipage=<n>", strprintf("Maximum tip age in seconds to consider node in initial block download (default: %u)", DEFAULT_MAX_TIP_AGE), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
@@ -724,10 +781,12 @@ void SetupServerArgs(ArgsManager& argsman)
 
     argsman.AddArg("-acceptnonstdtxn", strprintf("Relay and mine \"non-standard\" transactions (%sdefault: %u)", "testnet/regtest only; ", !testnetChainParams->RequireStandard()), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::NODE_RELAY);
     argsman.AddArg("-dustrelayfee=<amt>", strprintf("Fee rate (in %s/kB) used to define dust, the value of an output such that it will cost more than its value in fees at this fee rate to spend it. (default: %s)", CURRENCY_UNIT, FormatMoney(DUST_RELAY_TX_FEE)), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::NODE_RELAY);
-    argsman.AddArg("-incrementalrelayfee=<amt>", strprintf("Fee rate (in %s/kB) used to define cost of relay, used for mempool limiting and BIP 125 replacement. (default: %s)", CURRENCY_UNIT, FormatMoney(DEFAULT_INCREMENTAL_RELAY_FEE)), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::NODE_RELAY);
+    argsman.AddArg("-incrementalrelayfee=<amt>", strprintf("Fee rate (in %s/kB) used to define cost of relay, used for mempool limiting. (default: %s)", CURRENCY_UNIT, FormatMoney(DEFAULT_INCREMENTAL_RELAY_FEE)), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::NODE_RELAY);
     argsman.AddArg("-bytespersigop", strprintf("Equivalent bytes per sigop in transactions for relay and mining (default: %u)", DEFAULT_BYTES_PER_SIGOP), ArgsManager::ALLOW_ANY, OptionsCategory::NODE_RELAY);
     argsman.AddArg("-datacarrier", strprintf("Relay and mine data carrier transactions (default: %u)", DEFAULT_ACCEPT_DATACARRIER), ArgsManager::ALLOW_ANY, OptionsCategory::NODE_RELAY);
     argsman.AddArg("-datacarriersize", strprintf("Maximum size of data in data carrier transactions we relay and mine (default: %u)", MAX_OP_RETURN_RELAY), ArgsManager::ALLOW_ANY, OptionsCategory::NODE_RELAY);
+    argsman.AddArg("-permitbaremultisig", strprintf("Relay non-P2SH multisig (default: %u)", DEFAULT_PERMIT_BAREMULTISIG), ArgsManager::ALLOW_ANY,
+                   OptionsCategory::NODE_RELAY);
     argsman.AddArg("-minrelaytxfee=<amt>", strprintf("Fees (in %s/kB) smaller than this are considered zero fee for relaying, mining and transaction creation (default: %s)",
         CURRENCY_UNIT, FormatMoney(DEFAULT_MIN_RELAY_TX_FEE)), ArgsManager::ALLOW_ANY, OptionsCategory::NODE_RELAY);
     argsman.AddArg("-whitelistforcerelay", strprintf("Add 'forcerelay' permission to whitelisted inbound peers with default permissions. This will relay transactions even if the transactions were already in the mempool. (default: %d)", DEFAULT_WHITELISTFORCERELAY), ArgsManager::ALLOW_ANY, OptionsCategory::NODE_RELAY);
@@ -738,35 +797,33 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-blockversion=<n>", "Override block version to test forking scenarios", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::BLOCK_CREATION);
 
     argsman.AddArg("-rest", strprintf("Accept public REST requests (default: %u)", DEFAULT_REST_ENABLE), ArgsManager::ALLOW_ANY, OptionsCategory::RPC);
-    argsman.AddArg("-rpcallowip=<ip>", "Allow JSON-RPC connections from specified source. Valid for <ip> are a single IP (e.g. 1.2.3.4), a network/netmask (e.g. 1.2.3.4/255.255.255.0) or a network/CIDR (e.g. 1.2.3.4/24). This option can be specified multiple times", ArgsManager::ALLOW_ANY, OptionsCategory::RPC);
+    argsman.AddArg("-rpcallowip=<ip>", "Allow JSON-RPC connections from specified source. Valid values for <ip> are a single IP (e.g. 1.2.3.4), a network/netmask (e.g. 1.2.3.4/255.255.255.0), a network/CIDR (e.g. 1.2.3.4/24), all ipv4 (0.0.0.0/0), or all ipv6 (::/0). This option can be specified multiple times", ArgsManager::ALLOW_ANY, OptionsCategory::RPC);
     argsman.AddArg("-rpcauth=<userpw>", "Username and HMAC-SHA-256 hashed password for JSON-RPC connections. The field <userpw> comes in the format: <USERNAME>:<SALT>$<HASH>. A canonical python script is included in share/rpcuser. The client then connects normally using the rpcuser=<USERNAME>/rpcpassword=<PASSWORD> pair of arguments. This option can be specified multiple times", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::RPC);
-    argsman.AddArg("-rpcbind=<addr>[:port]", "Bind to given address to listen for JSON-RPC connections. Do not expose the RPC server to untrusted networks such as the public internet! This option is ignored unless -rpcallowip is also passed. Port is optional and overrides -rpcport. Use [host]:port notation for IPv6. This option can be specified multiple times (default: 127.0.0.1 and ::1 i.e., localhost, or if -rpcallowip has been specified, 0.0.0.0 and :: i.e., all addresses)", ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY | ArgsManager::SENSITIVE, OptionsCategory::RPC);
+    argsman.AddArg("-rpcbind=<addr>[:port]", "Bind to given address to listen for JSON-RPC connections. Do not expose the RPC server to untrusted networks such as the public internet! This option is ignored unless -rpcallowip is also passed. Port is optional and overrides -rpcport. Use [host]:port notation for IPv6. This option can be specified multiple times (default: 127.0.0.1 and ::1 i.e., localhost, or if -rpcallowip has been specified, 0.0.0.0 and :: i.e., all addresses)", ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::RPC);
+    argsman.AddArg("-rpcdoccheck", strprintf("Throw a non-fatal error at runtime if the documentation for an RPC is incorrect (default: %u)", DEFAULT_RPC_DOC_CHECK), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::RPC);
     argsman.AddArg("-rpccookiefile=<loc>", "Location of the auth cookie. Relative paths will be prefixed by a net-specific datadir location. (default: data dir)", ArgsManager::ALLOW_ANY, OptionsCategory::RPC);
     argsman.AddArg("-rpcexternaluser=<users>", "List of comma-separated usernames for JSON-RPC external connections", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::RPC);
     argsman.AddArg("-rpcexternalworkqueue=<n>", strprintf("Set the depth of the work queue to service external RPC calls (default: %d)", DEFAULT_HTTP_WORKQUEUE), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::RPC);
     argsman.AddArg("-rpcpassword=<pw>", "Password for JSON-RPC connections", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::RPC);
-    argsman.AddArg("-rpcport=<port>", strprintf("Listen for JSON-RPC connections on <port> (default: %u, testnet: %u, regtest: %u)", defaultBaseParams->RPCPort(), testnetBaseParams->RPCPort(), regtestBaseParams->RPCPort()), ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::RPC);
+    argsman.AddArg("-rpcport=<port>", strprintf("Listen for JSON-RPC connections on <port> (default: %u, testnet: %u, devnet: %u, regtest: %u)", defaultBaseParams->RPCPort(), testnetBaseParams->RPCPort(), devnetBaseParams->RPCPort(), regtestBaseParams->RPCPort()), ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::RPC);
     argsman.AddArg("-rpcservertimeout=<n>", strprintf("Timeout during HTTP requests (default: %d)", DEFAULT_HTTP_SERVER_TIMEOUT), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::RPC);
     argsman.AddArg("-rpcthreads=<n>", strprintf("Set the number of threads to service RPC calls (default: %d)", DEFAULT_HTTP_THREADS), ArgsManager::ALLOW_ANY, OptionsCategory::RPC);
     argsman.AddArg("-rpcuser=<user>", "Username for JSON-RPC connections", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::RPC);
     argsman.AddArg("-rpcwhitelist=<whitelist>", "Set a whitelist to filter incoming RPC calls for a specific user. The field <whitelist> comes in the format: <USERNAME>:<rpc 1>,<rpc 2>,...,<rpc n>. If multiple whitelists are set for a given user, they are set-intersected. See -rpcwhitelistdefault documentation for information on default whitelist behavior.", ArgsManager::ALLOW_ANY, OptionsCategory::RPC);
-    argsman.AddArg("-rpcwhitelistdefault", "Sets default behavior for rpc whitelisting. Unless rpcwhitelistdefault is set to 0, if any -rpcwhitelist is set, the rpc server acts as if all rpc users are subject to empty-unless-otherwise-specified whitelists. If rpcwhitelistdefault is set to 1 and no -rpcwhitelist is set, rpc server acts as if all rpc users are subject to empty whitelists.", ArgsManager::ALLOW_BOOL, OptionsCategory::RPC);
+    argsman.AddArg("-rpcwhitelistdefault", "Sets default behavior for rpc whitelisting. Unless rpcwhitelistdefault is set to 0, if any -rpcwhitelist is set, the rpc server acts as if all rpc users are subject to empty-unless-otherwise-specified whitelists. If rpcwhitelistdefault is set to 1 and no -rpcwhitelist is set, rpc server acts as if all rpc users are subject to empty whitelists.", ArgsManager::ALLOW_ANY, OptionsCategory::RPC);
     argsman.AddArg("-rpcworkqueue=<n>", strprintf("Set the depth of the work queue to service RPC calls (default: %d)", DEFAULT_HTTP_WORKQUEUE), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::RPC);
     argsman.AddArg("-server", "Accept command line and JSON-RPC commands", ArgsManager::ALLOW_ANY, OptionsCategory::RPC);
 
-    hidden_args.emplace_back("-statsenabled");
     argsman.AddArg("-statsbatchsize=<bytes>", strprintf("Specify the size of each batch of stats messages (default: %d)", DEFAULT_STATSD_BATCH_SIZE), ArgsManager::ALLOW_ANY, OptionsCategory::STATSD);
     argsman.AddArg("-statsduration=<ms>", strprintf("Specify the number of milliseconds between stats messages (default: %d)", DEFAULT_STATSD_DURATION), ArgsManager::ALLOW_ANY, OptionsCategory::STATSD);
     argsman.AddArg("-statshost=<ip>", strprintf("Specify statsd host (default: %s)", DEFAULT_STATSD_HOST), ArgsManager::ALLOW_ANY, OptionsCategory::STATSD);
-    hidden_args.emplace_back("-statshostname");
-    argsman.AddArg("-statsport=<port>", strprintf("Specify statsd port (default: %u)", DEFAULT_STATSD_PORT), ArgsManager::ALLOW_ANY, OptionsCategory::STATSD);
-    hidden_args.emplace_back("-statsns");
+    hidden_args.emplace_back("-statsport");
     argsman.AddArg("-statsperiod=<seconds>", strprintf("Specify the number of seconds between periodic measurements (default: %d)", DEFAULT_STATSD_PERIOD), ArgsManager::ALLOW_ANY, OptionsCategory::STATSD);
     argsman.AddArg("-statsprefix=<string>", strprintf("Specify an optional string prepended to every stats key (default: %s)", DEFAULT_STATSD_PREFIX), ArgsManager::ALLOW_ANY, OptionsCategory::STATSD);
     argsman.AddArg("-statssuffix=<string>", strprintf("Specify an optional string appended to every stats key (default: %s)", DEFAULT_STATSD_SUFFIX), ArgsManager::ALLOW_ANY, OptionsCategory::STATSD);
 #if HAVE_DECL_FORK
-    argsman.AddArg("-daemon", strprintf("Run in the background as a daemon and accept commands (default: %d)", DEFAULT_DAEMON), ArgsManager::ALLOW_BOOL, OptionsCategory::OPTIONS);
-    argsman.AddArg("-daemonwait", strprintf("Wait for initialization to be finished before exiting. This implies -daemon (default: %d)", DEFAULT_DAEMONWAIT), ArgsManager::ALLOW_BOOL, OptionsCategory::OPTIONS);
+    argsman.AddArg("-daemon", strprintf("Run in the background as a daemon and accept commands (default: %d)", DEFAULT_DAEMON), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-daemonwait", strprintf("Wait for initialization to be finished before exiting. This implies -daemon (default: %d)", DEFAULT_DAEMONWAIT), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
 #else
     hidden_args.emplace_back("-daemon");
     hidden_args.emplace_back("-daemonwait");
@@ -776,27 +833,8 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddHiddenArgs(hidden_args);
 }
 
-std::string LicenseInfo()
-{
-    const std::string URL_SOURCE_CODE = "<https://github.com/dashpay/dash>";
-
-    return CopyrightHolders(_("Copyright (C)").translated, 2014, COPYRIGHT_YEAR) + "\n" +
-           "\n" +
-           strprintf(_("Please contribute if you find %s useful. "
-                       "Visit %s for further information about the software.").translated,
-               PACKAGE_NAME, "<" PACKAGE_URL ">") +
-           "\n" +
-           strprintf(_("The source code is available from %s.").translated,
-               URL_SOURCE_CODE) +
-           "\n" +
-           "\n" +
-           _("This is experimental software.").translated + "\n" +
-           strprintf(_("Distributed under the MIT software license, see the accompanying file %s or %s").translated, "COPYING", "<https://opensource.org/licenses/MIT>") +
-           "\n";
-}
-
 static bool fHaveGenesis = false;
-static Mutex g_genesis_wait_mutex;
+static GlobalMutex g_genesis_wait_mutex;
 static std::condition_variable g_genesis_wait_cv;
 
 static void BlockNotifyGenesisWait(const CBlockIndex* pBlockIndex)
@@ -827,15 +865,16 @@ static void PeriodicStats(NodeContext& node)
     const ArgsManager& args = *Assert(node.args);
     ChainstateManager& chainman = *Assert(node.chainman);
     const CTxMemPool& mempool = *Assert(node.mempool);
-    CCoinsStats stats{CoinStatsHashType::NONE};
+    const llmq::CInstantSendManager& isman = *Assert(node.llmq_ctx->isman);
     chainman.ActiveChainstate().ForceFlushStateToDisk();
-    if (WITH_LOCK(cs_main, return GetUTXOStats(&chainman.ActiveChainstate().CoinsDB(), chainman.m_blockman, stats, node.rpc_interruption_point, chainman.ActiveChain().Tip()))) {
-        ::g_stats_client->gauge("utxoset.tx", stats.nTransactions, 1.0f);
-        ::g_stats_client->gauge("utxoset.txOutputs", stats.nTransactionOutputs, 1.0f);
-        ::g_stats_client->gauge("utxoset.dbSizeBytes", stats.nDiskSize, 1.0f);
-        ::g_stats_client->gauge("utxoset.blockHeight", stats.nHeight, 1.0f);
-        if (stats.total_amount.has_value()) {
-            ::g_stats_client->gauge("utxoset.totalAmount", (double)stats.total_amount.value() / (double)COIN, 1.0f);
+    const auto maybe_stats = WITH_LOCK(::cs_main, return GetUTXOStats(&chainman.ActiveChainstate().CoinsDB(), chainman.m_blockman, /*hash_type=*/CoinStatsHashType::NONE, node.rpc_interruption_point, chainman.ActiveChain().Tip(), /*index_requested=*/true));
+    if (maybe_stats.has_value()) {
+        ::g_stats_client->gauge("utxoset.tx", maybe_stats->nTransactions, 1.0f);
+        ::g_stats_client->gauge("utxoset.txOutputs", maybe_stats->nTransactionOutputs, 1.0f);
+        ::g_stats_client->gauge("utxoset.dbSizeBytes", maybe_stats->nDiskSize, 1.0f);
+        ::g_stats_client->gauge("utxoset.blockHeight", maybe_stats->nHeight, 1.0f);
+        if (maybe_stats->total_amount.has_value()) {
+            ::g_stats_client->gauge("utxoset.totalAmount", (double)maybe_stats->total_amount.value() / (double)COIN, 1.0f);
         }
     } else {
         // something went wrong
@@ -877,8 +916,9 @@ static void PeriodicStats(NodeContext& node)
         ::g_stats_client->gauge("transactions.mempool.totalTransactions", mempool.size(), 1.0f);
         ::g_stats_client->gauge("transactions.mempool.totalTxBytes", (int64_t) mempool.GetTotalTxSize(), 1.0f);
         ::g_stats_client->gauge("transactions.mempool.memoryUsageBytes", (int64_t) mempool.DynamicMemoryUsage(), 1.0f);
-        ::g_stats_client->gauge("transactions.mempool.minFeePerKb", mempool.GetMinFee(args.GetArg("-maxmempool", DEFAULT_MAX_MEMPOOL_SIZE) * 1000000).GetFeePerK(), 1.0f);
+        ::g_stats_client->gauge("transactions.mempool.minFeePerKb", mempool.GetMinFee(args.GetIntArg("-maxmempool", DEFAULT_MAX_MEMPOOL_SIZE) * 1000000).GetFeePerK(), 1.0f);
     }
+    ::g_stats_client->gauge("transactions.mempool.lockedTransactions", isman.GetInstantSendLockCount(), 1.0f);
 }
 
 static bool AppInitServers(NodeContext& node)
@@ -911,12 +951,12 @@ void InitParameterInteraction(ArgsManager& args)
             LogPrintf("%s: parameter interaction: -whitebind set -> setting -listen=1\n", __func__);
     }
 
-    if (args.IsArgSet("-connect")) {
+    if (args.IsArgSet("-connect") || args.GetIntArg("-maxconnections", DEFAULT_MAX_PEER_CONNECTIONS) <= 0) {
         // when only connecting to trusted nodes, do not seed via DNS, or listen by default
         if (args.SoftSetBoolArg("-dnsseed", false))
-            LogPrintf("%s: parameter interaction: -connect set -> setting -dnsseed=0\n", __func__);
+            LogPrintf("%s: parameter interaction: -connect or -maxconnections=0 set -> setting -dnsseed=0\n", __func__);
         if (args.SoftSetBoolArg("-listen", false))
-            LogPrintf("%s: parameter interaction: -connect set -> setting -listen=0\n", __func__);
+            LogPrintf("%s: parameter interaction: -connect or -maxconnections=0 set -> setting -listen=0\n", __func__);
     }
 
     std::string proxy_arg = args.GetArg("-proxy", "");
@@ -979,7 +1019,7 @@ void InitParameterInteraction(ArgsManager& args)
         }
     }
 
-    int64_t nPruneArg = args.GetArg("-prune", 0);
+    int64_t nPruneArg = args.GetIntArg("-prune", 0);
     if (nPruneArg > 0) {
         if (args.SoftSetBoolArg("-disablegovernance", true)) {
             LogPrintf("%s: parameter interaction: -prune=%d -> setting -disablegovernance=true\n", __func__, nPruneArg);
@@ -996,13 +1036,22 @@ void InitParameterInteraction(ArgsManager& args)
         args.GetBoolArg("-spentindex", DEFAULT_SPENTINDEX) ||
         args.GetBoolArg("-timestampindex", DEFAULT_TIMESTAMPINDEX);
 
-    if (fAdditionalIndexes && args.GetArg("-checklevel", DEFAULT_CHECKLEVEL) < 4) {
+    if (fAdditionalIndexes && args.GetIntArg("-checklevel", DEFAULT_CHECKLEVEL) < 4) {
         args.ForceSetArg("-checklevel", "4");
         LogPrintf("%s: parameter interaction: additional indexes -> setting -checklevel=4\n", __func__);
     }
 
-    if (args.IsArgSet("-masternodeblsprivkey") && args.SoftSetBoolArg("-disablewallet", true)) {
-        LogPrintf("%s: parameter interaction: -masternodeblsprivkey set -> setting -disablewallet=1\n", __func__);
+    if (args.IsArgSet("-masternodeblsprivkey")) {
+        if (args.SoftSetBoolArg("-disablewallet", true)) {
+            LogPrintf("%s: parameter interaction: -masternodeblsprivkey set -> setting -disablewallet=1\n", __func__);
+        }
+        // Enable block filters for masternodes to improve network services
+        if (args.SoftSetBoolArg("-peerblockfilters", true)) {
+            LogPrintf("%s: parameter interaction: -masternodeblsprivkey set -> setting -peerblockfilters=1\n", __func__);
+        }
+        if (args.SoftSetArg("-blockfilterindex", "basic")) {
+            LogPrintf("%s: parameter interaction: -masternodeblsprivkey set -> setting -blockfilterindex=basic\n", __func__);
+        }
     }
 }
 
@@ -1023,7 +1072,7 @@ namespace { // Variables internal to initialization process only
 int nMaxConnections;
 int nUserMaxConnections;
 int nFD;
-ServiceFlags nLocalServices = ServiceFlags(NODE_NETWORK | NODE_NETWORK_LIMITED | NODE_HEADERS_COMPRESSED);
+ServiceFlags nLocalServices = ServiceFlags(NODE_NETWORK_LIMITED | NODE_HEADERS_COMPRESSED);
 int64_t peer_connect_timeout;
 std::set<BlockFilterType> g_enabled_filter_types;
 
@@ -1065,10 +1114,6 @@ bool AppInitBasicSetup(const ArgsManager& args)
     }
 
 #ifndef WIN32
-    if (!args.GetBoolArg("-sysperms", false)) {
-        umask(077);
-    }
-
     // Clean shutdown on SIGTERM
     registerSignalHandler(SIGTERM, HandleSIGTERM);
     registerSignalHandler(SIGINT, HandleSIGTERM);
@@ -1150,7 +1195,7 @@ bool AppInitParameterInteraction(const ArgsManager& args)
         nLocalServices = ServiceFlags(nLocalServices | NODE_COMPACT_FILTERS);
     }
 
-    if (args.GetArg("-prune", 0)) {
+    if (args.GetIntArg("-prune", 0)) {
         if (args.GetBoolArg("-txindex", DEFAULT_TXINDEX))
             return InitError(_("Prune mode is incompatible with -txindex."));
         if (args.GetBoolArg("-reindex-chainstate", false)) {
@@ -1176,6 +1221,11 @@ bool AppInitParameterInteraction(const ArgsManager& args)
 
     fAllowPrivateNet = args.GetBoolArg("-allowprivatenet", DEFAULT_ALLOWPRIVATENET);
 
+    // If -forcednsseed is set to true, ensure -dnsseed has not been set to false
+    if (args.GetBoolArg("-forcednsseed", DEFAULT_FORCEDNSSEED) && !args.GetBoolArg("-dnsseed", DEFAULT_DNSSEED)){
+        return InitError(_("Cannot set -forcednsseed to true when setting -dnsseed to false."));
+    }
+
     // -bind and -whitebind can't be set when not listening
     size_t nUserBind = args.GetArgs("-bind").size() + args.GetArgs("-whitebind").size();
     if (nUserBind != 0 && !args.GetBoolArg("-listen", DEFAULT_LISTEN)) {
@@ -1189,7 +1239,7 @@ bool AppInitParameterInteraction(const ArgsManager& args)
 
     // Make sure enough file descriptors are available
     int nBind = std::max(nUserBind, size_t(1));
-    nUserMaxConnections = args.GetArg("-maxconnections", DEFAULT_MAX_PEER_CONNECTIONS);
+    nUserMaxConnections = args.GetIntArg("-maxconnections", DEFAULT_MAX_PEER_CONNECTIONS);
     nMaxConnections = std::max(nUserMaxConnections, 0);
 
     nFD = RaiseFileDescriptorLimit(nMaxConnections + MIN_CORE_FILEDESCRIPTORS + MAX_ADDNODE_CONNECTIONS + nBind + NUM_FDS_MESSAGE_CAPTURE);
@@ -1237,12 +1287,11 @@ bool AppInitParameterInteraction(const ArgsManager& args)
     }
 
     // mempool limits
-    int64_t nMempoolSizeMax = args.GetArg("-maxmempool", DEFAULT_MAX_MEMPOOL_SIZE) * 1000000;
-    int64_t nMempoolSizeMin = args.GetArg("-limitdescendantsize", DEFAULT_DESCENDANT_SIZE_LIMIT) * 1000 * 40;
+    int64_t nMempoolSizeMax = args.GetIntArg("-maxmempool", DEFAULT_MAX_MEMPOOL_SIZE) * 1000000;
+    int64_t nMempoolSizeMin = args.GetIntArg("-limitdescendantsize", DEFAULT_DESCENDANT_SIZE_LIMIT) * 1000 * 40;
     if (nMempoolSizeMax < 0 || nMempoolSizeMax < nMempoolSizeMin)
         return InitError(strprintf(_("-maxmempool must be at least %d MB"), std::ceil(nMempoolSizeMin / 1000000.0)));
-    // incremental relay fee sets the minimum feerate increase necessary for BIP 125 replacement in the mempool
-    // and the amount the mempool min fee increases above the feerate of txs evicted due to mempool limiting.
+    // incremental relay fee sets the amount the mempool min fee increases above the feerate of txs evicted due to mempool limiting.
     if (args.IsArgSet("-incrementalrelayfee")) {
         if (std::optional<CAmount> inc_relay_fee = ParseMoney(args.GetArg("-incrementalrelayfee", ""))) {
             ::incrementalRelayFee = CFeeRate{inc_relay_fee.value()};
@@ -1252,7 +1301,7 @@ bool AppInitParameterInteraction(const ArgsManager& args)
     }
 
     // block pruning; get the amount of disk space (in MiB) to allot for block & undo files
-    int64_t nPruneArg = args.GetArg("-prune", 0);
+    int64_t nPruneArg = args.GetIntArg("-prune", 0);
     if (nPruneArg < 0) {
         return InitError(_("Prune cannot be configured with a negative value."));
     }
@@ -1276,12 +1325,12 @@ bool AppInitParameterInteraction(const ArgsManager& args)
         fPruneMode = true;
     }
 
-    nConnectTimeout = args.GetArg("-timeout", DEFAULT_CONNECT_TIMEOUT);
+    nConnectTimeout = args.GetIntArg("-timeout", DEFAULT_CONNECT_TIMEOUT);
     if (nConnectTimeout <= 0) {
         nConnectTimeout = DEFAULT_CONNECT_TIMEOUT;
     }
 
-    peer_connect_timeout = args.GetArg("-peertimeout", DEFAULT_PEER_CONNECT_TIMEOUT);
+    peer_connect_timeout = args.GetIntArg("-peertimeout", DEFAULT_PEER_CONNECT_TIMEOUT);
     if (peer_connect_timeout <= 0) {
         return InitError(Untranslated("peertimeout must be a positive integer."));
     }
@@ -1321,21 +1370,21 @@ bool AppInitParameterInteraction(const ArgsManager& args)
     if (!chainparams.IsTestChain() && !fRequireStandard) {
         return InitError(strprintf(Untranslated("acceptnonstdtxn is not currently supported for %s chain"), chainparams.NetworkIDString()));
     }
-    nBytesPerSigOp = args.GetArg("-bytespersigop", nBytesPerSigOp);
+    nBytesPerSigOp = args.GetIntArg("-bytespersigop", nBytesPerSigOp);
 
     if (!g_wallet_init_interface.ParameterInteraction()) return false;
 
     fIsBareMultisigStd = args.GetBoolArg("-permitbaremultisig", DEFAULT_PERMIT_BAREMULTISIG);
     fAcceptDatacarrier = args.GetBoolArg("-datacarrier", DEFAULT_ACCEPT_DATACARRIER);
-    nMaxDatacarrierBytes = args.GetArg("-datacarriersize", nMaxDatacarrierBytes);
+    nMaxDatacarrierBytes = args.GetIntArg("-datacarriersize", nMaxDatacarrierBytes);
 
     // Option to startup with mocktime set (used for regression testing):
-    SetMockTime(args.GetArg("-mocktime", 0)); // SetMockTime(0) is a no-op
+    SetMockTime(args.GetIntArg("-mocktime", 0)); // SetMockTime(0) is a no-op
 
     if (args.GetBoolArg("-peerbloomfilters", DEFAULT_PEERBLOOMFILTERS))
         nLocalServices = ServiceFlags(nLocalServices | NODE_BLOOM);
 
-    nMaxTipAge = args.GetArg("-maxtipage", DEFAULT_MAX_TIP_AGE);
+    nMaxTipAge = args.GetIntArg("-maxtipage", DEFAULT_MAX_TIP_AGE);
 
     if (args.GetBoolArg("-reindex-chainstate", false)) {
         // indexes that must be deactivated to prevent index corruption, see #24630
@@ -1351,9 +1400,8 @@ bool AppInitParameterInteraction(const ArgsManager& args)
     }
 
     try {
-        const bool fRecoveryEnabled{llmq::QuorumDataRecoveryEnabled()};
-        const bool fQuorumVvecRequestsEnabled{llmq::GetEnabledQuorumVvecSyncEntries().size() > 0};
-        if (!fRecoveryEnabled && fQuorumVvecRequestsEnabled) {
+        const bool fQuorumVvecRequestsEnabled{llmq::GetEnabledQuorumVvecSyncEntries(args).size() > 0};
+        if (!args.GetBoolArg("-llmq-data-recovery", llmq::DEFAULT_ENABLE_QUORUM_DATA_RECOVERY) && fQuorumVvecRequestsEnabled) {
             InitWarning(Untranslated("-llmq-qvvec-sync set but recovery is disabled due to -llmq-data-recovery=0"));
         }
     } catch (const std::invalid_argument& e) {
@@ -1370,10 +1418,10 @@ bool AppInitParameterInteraction(const ArgsManager& args)
         if (!args.GetBoolArg("-peerbloomfilters", DEFAULT_PEERBLOOMFILTERS)) {
             return InitError(Untranslated("Masternode must have bloom filters enabled, set -peerbloomfilters=1"));
         }
-        if (args.GetArg("-prune", 0) > 0) {
+        if (args.GetIntArg("-prune", 0) > 0) {
             return InitError(Untranslated("Masternode must have no pruning enabled, set -prune=0"));
         }
-        if (args.GetArg("-maxconnections", DEFAULT_MAX_PEER_CONNECTIONS) < DEFAULT_MAX_PEER_CONNECTIONS) {
+        if (args.GetIntArg("-maxconnections", DEFAULT_MAX_PEER_CONNECTIONS) < DEFAULT_MAX_PEER_CONNECTIONS) {
             return InitError(strprintf(Untranslated("Masternode must be able to handle at least %d connections, set -maxconnections=%d"), DEFAULT_MAX_PEER_CONNECTIONS, DEFAULT_MAX_PEER_CONNECTIONS));
         }
         if (args.GetBoolArg("-disablegovernance", !DEFAULT_GOVERNANCE_ENABLE)) {
@@ -1394,7 +1442,7 @@ bool AppInitParameterInteraction(const ArgsManager& args)
 static bool LockDataDirectory(bool probeOnly)
 {
     // Make sure only a single Dash Core process is using the data directory.
-    fs::path datadir = gArgs.GetDataDirNet();
+    const fs::path& datadir = gArgs.GetDataDirNet();
     if (!DirIsWritable(datadir)) {
         return InitError(strprintf(_("Cannot write to data directory '%s'; check permissions."), fs::PathToString(datadir)));
     }
@@ -1434,7 +1482,7 @@ bool AppInitLockDataDirectory()
 
 bool AppInitInterfaces(NodeContext& node)
 {
-    node.chain = interfaces::MakeChain(node);
+    node.chain = node.init->makeChain();
     return true;
 }
 
@@ -1445,7 +1493,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 
     auto opt_max_upload = ParseByteUnits(args.GetArg("-maxuploadtarget", DEFAULT_MAX_UPLOAD_TARGET), ByteUnit::M);
     if (!opt_max_upload) {
-        return InitError(strprintf(_("Unable to parse -maxuploadtarget: '%s' (possible integer overflow?)"), args.GetArg("-maxuploadtarget", "")));
+        return InitError(strprintf(_("Unable to parse -maxuploadtarget: '%s'"), args.GetArg("-maxuploadtarget", "")));
     }
 
     // ********************************************************* Step 4a: application initialization
@@ -1472,7 +1520,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     InitSignatureCache();
     InitScriptExecutionCache();
 
-    int script_threads = args.GetArg("-par", DEFAULT_SCRIPTCHECK_THREADS);
+    int script_threads = args.GetIntArg("-par", DEFAULT_SCRIPTCHECK_THREADS);
     if (script_threads <= 0) {
         // -par=0 means autodetect (number of cores - 1 script threads)
         // -par=-n means "leave n cores free" (number of cores - n - 1 script threads)
@@ -1514,11 +1562,27 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     /* Register RPC commands regardless of -server setting so they will be
      * available in the GUI RPC console even if external calls are disabled.
      */
-    tableRPC.InitPlatformRestrictions();
     RegisterAllCoreRPCCommands(tableRPC);
     for (const auto& client : node.chain_clients) {
         client->registerRpcs();
     }
+#ifdef ENABLE_WALLET
+    // Register non-core wallet-only RPC commands. These are commands that
+    // aren't a part of the wallet library but heavily rely on wallet logic.
+    // TODO: Move them to chain client interfaces so they can be called
+    //       with registerRpcs()
+    if (!args.GetBoolArg("-disablewallet", DEFAULT_DISABLE_WALLET)) {
+        for (const auto& commands : {
+            GetWalletCoinJoinRPCCommands(),
+            GetWalletEvoRPCCommands(),
+            GetWalletGovernanceRPCCommands(),
+            GetWalletMasternodeRPCCommands(),
+        }) {
+            node.wallet_loader->registerOtherRpcs(commands);
+        }
+    }
+#endif // ENABLE_WALLET
+
 #if ENABLE_ZMQ
     RegisterZMQRPCCommands(tableRPC);
 #endif
@@ -1536,7 +1600,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 
     // ********************************************************* Step 5: verify wallet database integrity
 
-    if (!g_wallet_init_interface.InitAutoBackup()) return false;
+    g_wallet_init_interface.InitAutoBackup();
     for (const auto& client : node.chain_clients) {
         if (!client->verify()) {
             return false;
@@ -1552,11 +1616,6 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     fListen = args.GetBoolArg("-listen", DEFAULT_LISTEN);
     fDiscover = args.GetBoolArg("-discover", true);
     const bool ignores_incoming_txs{args.GetBoolArg("-blocksonly", DEFAULT_BLOCKSONLY)};
-
-    // We need to initialize g_stats_client early as currently, g_stats_client is called
-    // regardless of whether transmitting stats are desirable or not and if
-    // g_stats_client isn't present when that attempt is made, the client will crash.
-    ::g_stats_client = InitStatsClient(args);
 
     {
 
@@ -1594,11 +1653,28 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         }
     }
 
+    std::string sem_str = args.GetArg("-socketevents", DEFAULT_SOCKETEVENTS);
+    ::g_socket_events_mode = SEMFromString(sem_str);
+    if (::g_socket_events_mode == SocketEventsMode::Unknown) {
+        return InitError(strprintf(_("Invalid -socketevents ('%s') specified. Only these modes are supported: %s"), sem_str, GetSupportedSocketEventsStr()));
+    }
+
+    // We need to initialize g_stats_client early as currently, g_stats_client is called
+    // regardless of whether transmitting stats are desirable or not and if
+    // g_stats_client isn't present when that attempt is made, the client will crash.
+    {
+        auto stats_client = StatsdClient::make(args);
+        if (!stats_client) {
+            return InitError(_("Cannot init Statsd client") + Untranslated(" (") + util::ErrorString(stats_client) + Untranslated(")"));
+        }
+        ::g_stats_client = std::move(*stats_client);
+    }
+
     assert(!node.banman);
-    node.banman = std::make_unique<BanMan>(gArgs.GetDataDirNet() / "banlist", &uiInterface, args.GetArg("-bantime", DEFAULT_MISBEHAVING_BANTIME));
+    node.banman = std::make_unique<BanMan>(gArgs.GetDataDirNet() / "banlist", &uiInterface, args.GetIntArg("-bantime", DEFAULT_MISBEHAVING_BANTIME));
     assert(!node.connman);
-    node.connman = std::make_unique<CConnman>(GetRand(std::numeric_limits<uint64_t>::max()),
-                                              GetRand(std::numeric_limits<uint64_t>::max()),
+    node.connman = std::make_unique<CConnman>(GetRand<uint64_t>(),
+                                              GetRand<uint64_t>(),
                                               *node.addrman, *node.netgroupman, args.GetBoolArg("-networkactive", true));
 
     assert(!node.fee_estimator);
@@ -1629,7 +1705,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         }
     }
 
-    int minsporkkeys = args.GetArg("-minsporkkeys", Params().MinSporkKeys());
+    int minsporkkeys = args.GetIntArg("-minsporkkeys", Params().MinSporkKeys());
     if (!node.sporkman->SetMinSporkKeys(minsporkkeys)) {
         return InitError(_("Invalid minimum number of spork signers specified with -minsporkkeys"));
     }
@@ -1641,18 +1717,70 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         }
     }
 
-    fMasternodeMode = false;
-    std::string strMasterNodeBLSPrivKey = args.GetArg("-masternodeblsprivkey", "");
-    if (!strMasterNodeBLSPrivKey.empty()) {
-        CBLSSecretKey keyOperator(ParseHex(strMasterNodeBLSPrivKey));
-        if (!keyOperator.IsValid()) {
-            return InitError(_("Invalid masternodeblsprivkey. Please see documentation."));
+    // Check port numbers
+    for (const std::string port_option : {
+        "-port",
+        "-rpcport",
+    }) {
+        if (args.IsArgSet(port_option)) {
+            const std::string port = args.GetArg(port_option, "");
+            uint16_t n;
+            if (!ParseUInt16(port, &n) || n == 0) {
+                return InitError(InvalidPortErrMsg(port_option, port));
+            }
         }
-        fMasternodeMode = true;
-        {
-            // Create and register mn_activeman, will init later in ThreadImport
-            node.mn_activeman = std::make_unique<CActiveMasternodeManager>(keyOperator, *node.connman, node.dmnman);
-            RegisterValidationInterface(node.mn_activeman.get());
+    }
+
+    for ([[maybe_unused]] const auto& [arg, unix] : std::vector<std::pair<std::string, bool>>{
+        // arg name                 UNIX socket support
+        {"-i2psam",                             false},
+        {"-onion",                               true},
+        {"-proxy",                               true},
+        {"-rpcbind",                            false},
+        {"-torcontrol",                         false},
+        {"-whitebind",                          false},
+        {"-zmqpubhashblock",                     true},
+        {"-zmqpubhashchainlock",                 true},
+        {"-zmqpubhashgovernanceobject",          true},
+        {"-zmqpubhashgovernancevote",            true},
+        {"-zmqpubhashinstantsenddoublespend",    true},
+        {"-zmqpubhashrecoveredsig",              true},
+        {"-zmqpubhashtx",                        true},
+        {"-zmqpubhashtxlock",                    true},
+        {"-zmqpubrawblock",                      true},
+        {"-zmqpubrawchainlock",                  true},
+        {"-zmqpubrawchainlocksig",               true},
+        {"-zmqpubrawgovernancevote",             true},
+        {"-zmqpubrawgovernanceobject",           true},
+        {"-zmqpubrawinstantsenddoublespend",     true},
+        {"-zmqpubrawrecoveredsig",               true},
+        {"-zmqpubrawtx",                         true},
+        {"-zmqpubrawtxlock",                     true},
+        {"-zmqpubrawtxlocksig",                  true},
+        {"-zmqpubsequence",                      true},
+    }) {
+        for (const std::string& socket_addr : args.GetArgs(arg)) {
+            std::string host_out;
+            uint16_t port_out{0};
+            if (!SplitHostPort(socket_addr, port_out, host_out)) {
+#if HAVE_SOCKADDR_UN
+                // Allow unix domain sockets for some options e.g. unix:/some/file/path
+                if (!unix || socket_addr.find(ADDR_PREFIX_UNIX) != 0) {
+                    return InitError(InvalidPortErrMsg(arg, socket_addr));
+                }
+#else
+                return InitError(InvalidPortErrMsg(arg, socket_addr));
+#endif
+            }
+        }
+    }
+
+    for (const std::string& socket_addr : args.GetArgs("-bind")) {
+        std::string host_out;
+        uint16_t port_out{0};
+        std::string bind_socket_addr = socket_addr.substr(0, socket_addr.rfind('='));
+        if (!SplitHostPort(bind_socket_addr, port_out, host_out)) {
+            return InitError(InvalidPortErrMsg("-bind", socket_addr));
         }
     }
 
@@ -1676,25 +1804,24 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     }
 
     if (args.IsArgSet("-onlynet")) {
-        std::set<enum Network> nets;
+        g_reachable_nets.RemoveAll();
         for (const std::string& snet : args.GetArgs("-onlynet")) {
             enum Network net = ParseNetwork(snet);
             if (net == NET_UNROUTABLE)
                 return InitError(strprintf(_("Unknown network specified in -onlynet: '%s'"), snet));
-            nets.insert(net);
-        }
-        for (int n = 0; n < NET_MAX; n++) {
-            enum Network net = (enum Network)n;
-            assert(IsReachable(net));
-            if (!nets.count(net))
-                SetReachable(net, false);
+            g_reachable_nets.Add(net);
         }
     }
 
     if (!args.IsArgSet("-cjdnsreachable")) {
-        SetReachable(NET_CJDNS, false);
+        if (args.IsArgSet("-onlynet") && g_reachable_nets.Contains(NET_CJDNS)) {
+            return InitError(
+                _("Outbound connections restricted to CJDNS (-onlynet=cjdns) but "
+                  "-cjdnsreachable is not provided"));
+        }
+        g_reachable_nets.Remove(NET_CJDNS);
     }
-    // Now IsReachable(NET_CJDNS) is true if:
+    // Now g_reachable_nets.Contains(NET_CJDNS) is true if:
     // 1. -cjdnsreachable is given and
     // 2.1. -onlynet is not given or
     // 2.2. -onlynet=cjdns is given
@@ -1702,7 +1829,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     // Requesting DNS seeds entails connecting to IPv4/IPv6, which -onlynet options may prohibit:
     // If -dnsseed=1 is explicitly specified, abort. If it's left unspecified by the user, we skip
     // the DNS seeds by adjusting -dnsseed in InitParameterInteraction.
-    if (args.GetBoolArg("-dnsseed", DEFAULT_DNSSEED) == true && !IsReachable(NET_IPV4) && !IsReachable(NET_IPV6)) {
+    if (args.GetBoolArg("-dnsseed", DEFAULT_DNSSEED) == true && !g_reachable_nets.Contains(NET_IPV4) && !g_reachable_nets.Contains(NET_IPV6)) {
         return InitError(strprintf(_("Incompatible options: -dnsseed=1 was explicitly specified, but -onlynet forbids connections to IPv4/IPv6")));
     };
 
@@ -1716,12 +1843,18 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     // -noproxy (or -proxy=0) as well as the empty string can be used to not set a proxy, this is the default
     std::string proxyArg = args.GetArg("-proxy", "");
     if (proxyArg != "" && proxyArg != "0") {
-        const std::optional<CService> proxyAddr{Lookup(proxyArg, 9050, fNameLookup)};
-        if (!proxyAddr.has_value()) {
-            return InitError(strprintf(_("Invalid -proxy address or hostname: '%s'"), proxyArg));
+        Proxy addrProxy;
+        if (IsUnixSocketPath(proxyArg)) {
+            addrProxy = Proxy(proxyArg, proxyRandomize);
+        } else {
+            const std::optional<CService> proxyAddr{Lookup(proxyArg, 9050, fNameLookup)};
+            if (!proxyAddr.has_value()) {
+                return InitError(strprintf(_("Invalid -proxy address or hostname: '%s'"), proxyArg));
+            }
+
+            addrProxy = Proxy(proxyAddr.value(), proxyRandomize);
         }
 
-        Proxy addrProxy = Proxy(proxyAddr.value(), proxyRandomize);
         if (!addrProxy.IsValid())
             return InitError(strprintf(_("Invalid -proxy address or hostname: '%s'"), proxyArg));
 
@@ -1732,7 +1865,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         onion_proxy = addrProxy;
     }
 
-    const bool onlynet_used_with_onion{args.IsArgSet("-onlynet") && IsReachable(NET_ONION)};
+    const bool onlynet_used_with_onion{args.IsArgSet("-onlynet") && g_reachable_nets.Contains(NET_ONION)};
 
     // -onion can be used to set only a proxy for .onion, or override normal proxy for .onion addresses
     // -noonion (or -onion=0) disables connecting to .onion entirely
@@ -1747,11 +1880,16 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                       "reaching the Tor network is explicitly forbidden: -onion=0"));
             }
         } else {
-            const std::optional<CService> addr{Lookup(onionArg, 9050, fNameLookup)};
-            if (!addr.has_value() || !addr->IsValid()) {
-                return InitError(strprintf(_("Invalid -onion address or hostname: '%s'"), onionArg));
+            if (IsUnixSocketPath(onionArg)) {
+                onion_proxy = Proxy(onionArg, proxyRandomize);
+            } else {
+                const std::optional<CService> addr{Lookup(onionArg, 9050, fNameLookup)};
+                if (!addr.has_value() || !addr->IsValid()) {
+                    return InitError(strprintf(_("Invalid -onion address or hostname: '%s'"), onionArg));
+                }
+
+                onion_proxy = Proxy(addr.value(), proxyRandomize);
             }
-            onion_proxy = Proxy{addr.value(), proxyRandomize};
         }
     }
 
@@ -1767,7 +1905,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                   "reaching the Tor network is not provided: none of -proxy, -onion or "
                   "-listenonion is given"));
         }
-        SetReachable(NET_ONION, false);
+        g_reachable_nets.Remove(NET_ONION);
     }
 
     for (const std::string& strAddr : args.GetArgs("-externalip")) {
@@ -1801,7 +1939,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     // cache size calculations
     CacheSizes cache_sizes = CalculateCacheSizes(args, g_enabled_filter_types.size());
 
-    int64_t nMempoolSizeMax = args.GetArg("-maxmempool", DEFAULT_MAX_MEMPOOL_SIZE) * 1000000;
+    int64_t nMempoolSizeMax = args.GetIntArg("-maxmempool", DEFAULT_MAX_MEMPOOL_SIZE) * 1000000;
     LogPrintf("Cache configuration:\n");
     LogPrintf("* Using %.1f MiB for block index database\n", cache_sizes.block_tree_db * (1.0 / 1024 / 1024));
     if (args.GetBoolArg("-txindex", DEFAULT_TXINDEX)) {
@@ -1818,12 +1956,12 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     assert(!node.chainman);
     assert(!node.govman);
     assert(!node.mn_sync);
-    const int mempool_check_ratio = std::clamp<int>(args.GetArg("-checkmempool", chainparams.DefaultConsistencyChecks() ? 1 : 0), 0, 1000000);
+    const int mempool_check_ratio = std::clamp<int>(args.GetIntArg("-checkmempool", chainparams.DefaultConsistencyChecks() ? 1 : 0), 0, 1000000);
 
     for (bool fLoaded = false; !fLoaded && !ShutdownRequested();) {
         node.mempool = std::make_unique<CTxMemPool>(node.fee_estimator.get(), mempool_check_ratio);
 
-        node.chainman = std::make_unique<ChainstateManager>();
+        node.chainman = std::make_unique<ChainstateManager>(chainparams);
         ChainstateManager& chainman = *node.chainman;
 
         /**
@@ -1834,9 +1972,9 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
          * need it or not further down and then query if the database is initialized
          * to check if validation is enabled.
          */
-        node.mn_sync = std::make_unique<CMasternodeSync>(*node.connman, *node.netfulfilledman);
+        node.mn_sync = std::make_unique<CMasternodeSync>(std::make_unique<NodeSyncNotifierImpl>(*node.connman, *node.netfulfilledman));
 
-        node.govman = std::make_unique<CGovernanceManager>(*node.mn_metaman, *node.netfulfilledman, *node.chainman, node.dmnman, *node.mn_sync);
+        node.govman = std::make_unique<CGovernanceManager>(*node.mn_metaman, *node.chainman, node.dmnman, *node.mn_sync);
 
         const bool fReset = fReindex;
         bilingual_str strLoadError;
@@ -1851,7 +1989,6 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                                               *node.mn_metaman,
                                               *node.mn_sync,
                                               *node.sporkman,
-                                              node.mn_activeman,
                                               node.chain_helper,
                                               node.cpoolman,
                                               node.dmnman,
@@ -1859,20 +1996,30 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                                               node.mnhf_manager,
                                               node.llmq_ctx,
                                               Assert(node.mempool.get()),
+                                              args.GetDataDirNet(),
                                               fPruneMode,
                                               args.GetBoolArg("-addressindex", DEFAULT_ADDRESSINDEX),
-                                              is_governance_enabled,
                                               args.GetBoolArg("-spentindex", DEFAULT_SPENTINDEX),
                                               args.GetBoolArg("-timestampindex", DEFAULT_TIMESTAMPINDEX),
-                                              args.GetBoolArg("-txindex", DEFAULT_TXINDEX),
                                               chainparams.GetConsensus(),
-                                              chainparams.NetworkIDString(),
                                               fReindexChainState,
                                               cache_sizes.block_tree_db,
                                               cache_sizes.coins_db,
                                               cache_sizes.coins,
                                               /*block_tree_db_in_memory=*/false,
                                               /*coins_db_in_memory=*/false,
+                                              /*dash_dbs_in_memory=*/false,
+                                              /*bls_threads=*/[&args]() -> int8_t {
+                                                  int8_t threads = args.GetIntArg("-parbls", llmq::DEFAULT_BLSCHECK_THREADS);
+                                                  if (threads <= 0) {
+                                                      // -parbls=0 means autodetect (number of cores - 1 validator threads)
+                                                      // -parbls=-n means "leave n cores free" (number of cores - n - 1 validator threads)
+                                                      threads += GetNumCores();
+                                                  }
+                                                  // Subtract 1 because the main thread counts towards the par threads
+                                                  return std::clamp<int8_t>(threads - 1, 0, llmq::MAX_BLSCHECK_THREADS);
+                                              }(),
+                                              args.GetIntArg("-maxrecsigsage", llmq::DEFAULT_MAX_RECOVERED_SIGS_AGE),
                                               /*shutdown_requested=*/ShutdownRequested,
                                               /*coins_error_cb=*/[]() {
                                                   uiInterface.ThreadSafeMessageBox(
@@ -1894,8 +2041,6 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                 return InitError(_("Incorrect or no genesis block found. Wrong datadir for network?"));
             case ChainstateLoadingError::ERROR_BAD_DEVNET_GENESIS_BLOCK:
                 return InitError(_("Incorrect or no devnet genesis block found. Wrong datadir for devnet specified?"));
-            case ChainstateLoadingError::ERROR_TXINDEX_DISABLED_WHEN_GOV_ENABLED:
-                return InitError(_("Transaction index can't be disabled with governance validation enabled. Either start with -disablegovernance command line switch or enable transaction index."));
             case ChainstateLoadingError::ERROR_ADDRIDX_NEEDS_REINDEX:
                 strLoadError = _("You need to rebuild the database using -reindex to enable -addressindex");
                 break;
@@ -1912,8 +2057,9 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                 strLoadError = _("Error initializing block database");
                 break;
             case ChainstateLoadingError::ERROR_CHAINSTATE_UPGRADE_FAILED:
-                strLoadError = _("Error upgrading chainstate database");
-                break;
+                return InitError(_("Unsupported chainstate database format found. "
+                                   "Please restart with -reindex-chainstate. This will "
+                                   "rebuild the chainstate database."));
             case ChainstateLoadingError::ERROR_REPLAYBLOCKS_FAILED:
                 strLoadError = _("Unable to replay blocks. You will need to rebuild the database using -reindex-chainstate.");
                 break;
@@ -1927,7 +2073,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                 strLoadError = _("Failed to commit Evo database");
                 break;
             case ChainstateLoadingError::ERROR_UPGRADING_EVO_DB:
-                strLoadError = _("Error upgrading Evo database");
+                strLoadError = _("Failed to upgrade Evo database");
                 break;
             case ChainstateLoadingError::ERROR_UPGRADING_SIGNALS_DB:
                 strLoadError = _("Error upgrading evo database for EHF");
@@ -1943,10 +2089,10 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             std::optional<ChainstateLoadVerifyError> maybe_verify_error;
             try {
                 uiInterface.InitMessage(_("Verifying blocks…").translated);
-                auto check_blocks = args.GetArg("-checkblocks", DEFAULT_CHECKBLOCKS);
+                auto check_blocks = args.GetIntArg("-checkblocks", DEFAULT_CHECKBLOCKS);
                 if (chainman.m_blockman.m_have_pruned && check_blocks > MIN_BLOCKS_TO_KEEP) {
-                    LogPrintf("Prune: pruned datadir may not have more than %d blocks; only checking available blocks\n",
-                              MIN_BLOCKS_TO_KEEP);
+                    LogWarning("pruned datadir may not have more than %d blocks; only checking available blocks\n",
+                                      MIN_BLOCKS_TO_KEEP);
                 }
                 maybe_verify_error = VerifyLoadedChainstate(chainman,
                                                             *Assert(node.evodb.get()),
@@ -1954,7 +2100,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                                                             fReindexChainState,
                                                             chainparams.GetConsensus(),
                                                             check_blocks,
-                                                            args.GetArg("-checklevel", DEFAULT_CHECKLEVEL),
+                                                            args.GetIntArg("-checklevel", DEFAULT_CHECKLEVEL),
                                                             /*get_unix_time_seconds=*/static_cast<int64_t(*)()>(GetTime),
                                                             [](bool bls_state) {
                                                                 LogPrintf("%s: bls_legacy_scheme=%d\n", __func__, bls_state);
@@ -2016,30 +2162,67 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 
     ChainstateManager& chainman = *Assert(node.chainman);
 
+    assert(!node.dstxman);
+    node.dstxman = std::make_unique<CDSTXManager>();
+
     assert(!node.peerman);
-    node.peerman = PeerManager::make(chainparams, *node.connman, *node.addrman, node.banman.get(),
+    node.peerman = PeerManager::make(chainparams, *node.connman, *node.addrman, node.banman.get(), *node.dstxman,
                                      chainman, *node.mempool, *node.mn_metaman, *node.mn_sync,
-                                     *node.govman, *node.sporkman, node.mn_activeman.get(), node.dmnman,
-                                     node.cj_ctx, node.llmq_ctx, ignores_incoming_txs);
+                                     *node.govman, *node.sporkman, node.active_ctx, node.dmnman,
+                                     node.cj_walletman, node.llmq_ctx, node.observer_ctx, ignores_incoming_txs);
     RegisterValidationInterface(node.peerman.get());
 
     g_ds_notification_interface = std::make_unique<CDSNotificationInterface>(
-        *node.connman, *node.mn_sync, *node.govman, *node.peerman, chainman, node.mn_activeman.get(), node.dmnman, node.llmq_ctx, node.cj_ctx
+        *node.connman, *node.dstxman, *node.mn_sync, *node.govman, chainman, node.dmnman, node.llmq_ctx
     );
     RegisterValidationInterface(g_ds_notification_interface.get());
 
-    // ********************************************************* Step 7c: Setup CoinJoin
+    // ********************************************************* Step 7c: Setup masternode mode or watch-only mode
+    assert(!node.active_ctx);
+    assert(!node.observer_ctx);
 
-    node.cj_ctx = std::make_unique<CJContext>(chainman, *node.connman, *node.dmnman, *node.mn_metaman, *node.mempool,
-                                              node.mn_activeman.get(), *node.mn_sync, *node.llmq_ctx->isman, node.peerman,
-                                              !ignores_incoming_txs);
-
-#ifdef ENABLE_WALLET
-    node.coinjoin_loader = interfaces::MakeCoinJoinLoader(*node.cj_ctx->walletman);
-    g_wallet_init_interface.InitCoinJoinSettings(*node.cj_ctx->walletman);
-#endif // ENABLE_WALLET
+    const bool quorums_recovery = args.GetBoolArg("-llmq-data-recovery", llmq::DEFAULT_ENABLE_QUORUM_DATA_RECOVERY);
+    const bool quorums_watch = args.GetBoolArg("-watchquorums", llmq::DEFAULT_WATCH_QUORUMS);
+    const llmq::QvvecSyncModeMap sync_map{llmq::GetEnabledQuorumVvecSyncEntries(args)};
+    const util::DbWrapperParams dash_db_params{.path = args.GetDataDirNet(), .memory = false, .wipe = (fReindex || fReindexChainState)};
+    if (const auto operator_sk_str = args.GetArg("-masternodeblsprivkey", ""); !operator_sk_str.empty()) {
+        const CBLSSecretKey operator_sk{ParseHex(operator_sk_str)};
+        if (!operator_sk.IsValid()) {
+            return InitError(_("Invalid masternodeblsprivkey. Please see documentation."));
+        }
+        // Will init later in ThreadImport
+        node.active_ctx = std::make_unique<ActiveContext>(*node.llmq_ctx->bls_worker, chainman, *node.connman, *node.dmnman, *node.govman, *node.mn_metaman,
+                                                          *node.mnhf_manager, *node.sporkman, *node.mempool, *node.llmq_ctx->clhandler, *node.llmq_ctx->isman,
+                                                          *node.llmq_ctx->quorum_block_processor, *node.llmq_ctx->qman, *node.llmq_ctx->qsnapman, *node.llmq_ctx->sigman,
+                                                          *node.peerman, *node.mn_sync, operator_sk, sync_map, dash_db_params, quorums_recovery, quorums_watch);
+        RegisterValidationInterface(node.active_ctx.get());
+    } else if (quorums_watch) {
+        node.observer_ctx = std::make_unique<llmq::ObserverContext>(*node.llmq_ctx->bls_worker, *node.connman, *node.dmnman, *node.mn_metaman, *node.mn_sync,
+                                                                    *node.llmq_ctx->quorum_block_processor, *node.llmq_ctx->qman, *node.llmq_ctx->qsnapman,
+                                                                    chainman, *node.sporkman, sync_map, dash_db_params, quorums_recovery);
+        RegisterValidationInterface(node.observer_ctx.get());
+    }
 
     // ********************************************************* Step 7d: Setup other Dash services
+
+    node.peerman->AddExtraHandler(std::make_unique<NetInstantSend>(node.peerman.get(), *node.llmq_ctx->isman, *node.llmq_ctx->qman, chainman.ActiveChainstate()));
+    node.peerman->AddExtraHandler(std::make_unique<NetSigning>(node.peerman.get(), *node.llmq_ctx->sigman));
+
+    if (node.active_ctx) {
+        auto cj_server = std::make_unique<CCoinJoinServer>(node.peerman.get(), chainman, *node.connman, *node.dmnman, *node.dstxman, *node.mn_metaman,
+                                                           *node.mempool, *node.active_ctx->nodeman, *node.mn_sync, *node.llmq_ctx->isman);
+        node.active_ctx->SetCJServer(cj_server.get());
+        node.peerman->AddExtraHandler(std::move(cj_server));
+    } else {
+        assert(!node.cj_walletman);
+        // Can return nullptr if built without wallet support, must check before use
+        node.cj_walletman = CJWalletManager::make(chainman, *node.dmnman, *node.mn_metaman, *node.mempool, *node.mn_sync,
+                                                  *node.llmq_ctx->isman, !ignores_incoming_txs);
+    }
+
+    if (node.cj_walletman) {
+        RegisterValidationInterface(node.cj_walletman.get());
+    }
 
     bool fLoadCacheFiles = !(fReindex || fReindexChainState) && (chainman.ActiveChain().Tip() != nullptr);
 
@@ -2067,15 +2250,12 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             }
             return InitError(strprintf(_("Failed to clear governance cache at %s"), file_path));
         }
+        node.peerman->AddExtraHandler(std::make_unique<NetGovernance>(node.peerman.get(), *node.govman, *node.mn_sync, *node.netfulfilledman, *node.connman));
     }
+    node.peerman->AddExtraHandler(std::make_unique<SyncManager>(node.peerman.get(), *node.govman, *node.mn_sync, *node.connman, *node.netfulfilledman));
 
     // ********************************************************* Step 8: start indexers
     if (args.GetBoolArg("-txindex", DEFAULT_TXINDEX)) {
-        LOCK(::cs_main);
-        if (const auto error{CheckLegacyTxindex(*Assert(chainman.m_blockman.m_block_tree_db))}) {
-            return InitError(*error);
-        }
-
         g_txindex = std::make_unique<TxIndex>(cache_sizes.tx_index, false, fReindex);
         if (!g_txindex->Start(chainman.ActiveChainstate())) {
             return false;
@@ -2112,12 +2292,9 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     }
     // ********************************************************* Step 10: data directory maintenance
 
-
-    // if pruning, unset the service bit and perform the initial blockstore prune
+    // if pruning, perform the initial blockstore prune
     // after any wallet rescanning has taken place.
     if (fPruneMode) {
-        LogPrintf("Unsetting NODE_NETWORK on prune mode\n");
-        nLocalServices = ServiceFlags(nLocalServices & ~NODE_NETWORK);
         if (!fReindex) {
             LOCK(cs_main);
             for (CChainState* chainstate : chainman.GetAll()) {
@@ -2125,6 +2302,9 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                 chainstate->PruneAndFlush();
             }
         }
+    } else {
+        LogPrintf("Setting NODE_NETWORK on non-prune mode\n");
+        nLocalServices = ServiceFlags(nLocalServices | NODE_NETWORK);
     }
 
     // As PruneAndFlush can take several minutes, it's possible the user
@@ -2137,29 +2317,26 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 
     // ********************************************************* Step 10a: schedule Dash-specific tasks
 
-    node.llmq_ctx->Start(*node.connman, *node.peerman);
+    node.llmq_ctx->Start();
+    node.peerman->StartHandlers();
+    if (node.observer_ctx) node.observer_ctx->Start();
 
     node.scheduler->scheduleEvery(std::bind(&CNetFulfilledRequestManager::DoMaintenance, std::ref(*node.netfulfilledman)), std::chrono::minutes{1});
-    node.scheduler->scheduleEvery(std::bind(&CMasternodeSync::DoMaintenance, std::ref(*node.mn_sync), std::cref(*node.peerman), std::cref(*node.govman)), std::chrono::seconds{1});
-    node.scheduler->scheduleEvery(std::bind(&CMasternodeUtils::DoMaintenance, std::ref(*node.connman), std::ref(*node.dmnman), std::ref(*node.mn_sync), std::ref(*node.cj_ctx)), std::chrono::minutes{1});
+    node.scheduler->scheduleEvery(std::bind(&CMasternodeUtils::DoMaintenance, std::ref(*node.connman), std::ref(*node.dmnman), std::ref(*node.mn_sync), node.cj_walletman.get()), std::chrono::minutes{1});
     node.scheduler->scheduleEvery(std::bind(&CDeterministicMNManager::DoMaintenance, std::ref(*node.dmnman)), std::chrono::seconds{10});
+    node.peerman->ScheduleHandlers(*node.scheduler);
 
-    if (node.govman->IsValid()) {
-        node.scheduler->scheduleEvery(std::bind(&CGovernanceManager::DoMaintenance, std::ref(*node.govman), std::ref(*node.connman)), std::chrono::minutes{5});
+    if (node.active_ctx) {
+        node.active_ctx->Start(*node.connman, *node.peerman);
+        node.scheduler->scheduleEvery(std::bind(&llmq::CDKGSessionManager::CleanupOldContributions, std::ref(*node.active_ctx->qdkgsman)), std::chrono::hours{1});
     }
 
-    if (node.mn_activeman) {
-        node.scheduler->scheduleEvery(std::bind(&CCoinJoinServer::DoMaintenance, std::ref(*node.cj_ctx->server)), std::chrono::seconds{1});
-        node.scheduler->scheduleEvery(std::bind(&llmq::CDKGSessionManager::CleanupOldContributions, std::ref(*node.llmq_ctx->qdkgsman)), std::chrono::hours{1});
-#ifdef ENABLE_WALLET
-    } else if (!ignores_incoming_txs) {
-        node.scheduler->scheduleEvery(std::bind(&CCoinJoinClientQueueManager::DoMaintenance, std::ref(*node.cj_ctx->queueman)), std::chrono::seconds{1});
-        node.scheduler->scheduleEvery(std::bind(&CoinJoinWalletManager::DoMaintenance, std::ref(*node.cj_ctx->walletman), std::ref(*node.connman)), std::chrono::seconds{1});
-#endif // ENABLE_WALLET
+    if (node.cj_walletman) {
+        node.cj_walletman->Schedule(*node.connman, *node.scheduler);
     }
 
     if (::g_stats_client->active()) {
-        int nStatsPeriod = std::min(std::max((int)args.GetArg("-statsperiod", DEFAULT_STATSD_PERIOD), MIN_STATSD_PERIOD), MAX_STATSD_PERIOD);
+        int nStatsPeriod = std::min(std::max((int)args.GetIntArg("-statsperiod", DEFAULT_STATSD_PERIOD), MIN_STATSD_PERIOD), MAX_STATSD_PERIOD);
         node.scheduler->scheduleEvery(std::bind(&PeriodicStats, std::ref(node)), std::chrono::seconds{nStatsPeriod});
     }
 
@@ -2172,6 +2349,24 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     if (!CheckDiskSpace(gArgs.GetBlocksDirPath())) {
         InitError(strprintf(_("Error: Disk space is low for %s"), fs::quoted(fs::PathToString(gArgs.GetBlocksDirPath()))));
         return false;
+    }
+
+    int chain_active_height = WITH_LOCK(cs_main, return chainman.ActiveChain().Height());
+
+    // On first startup, warn on low block storage space
+    if (!fReindex && !fReindexChainState && chain_active_height <= 1) {
+        uint64_t additional_bytes_needed = fPruneMode ? nPruneTarget
+            : chainparams.AssumedBlockchainSize() * 1024 * 1024 * 1024;
+
+        if (!CheckDiskSpace(args.GetBlocksDirPath(), additional_bytes_needed)) {
+            InitWarning(strprintf(_(
+                    "Disk space for %s may not accommodate the block files. " \
+                    "Approximately %u GB of data will be stored in this directory."
+                ),
+                fs::quoted(fs::PathToString(args.GetBlocksDirPath())),
+                chainparams.AssumedBlockchainSize()
+            ));
+        }
     }
 
     // Either install a handler to notify us when genesis activates, or set fHaveGenesis directly.
@@ -2211,8 +2406,83 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     }
 
     chainman.m_load_block = std::thread(&util::TraceThread, "loadblk", [=, &args, &chainman, &node] {
-        ThreadImport(chainman, *node.dmnman, *g_ds_notification_interface, vImportFiles, node.mn_activeman.get(), args);
+        ThreadImport(chainman, vImportFiles, args);
+
+        // force UpdatedBlockTip to initialize nCachedBlockHeight for DS, MN payments and budgets
+        // but don't call it directly to prevent triggering of other listeners like zmq etc.
+        // GetMainSignals().UpdatedBlockTip(::ChainActive().Tip());
+        g_ds_notification_interface->InitializeCurrentBlockTip();
+
+        {
+            // Get all UTXOs for each MN collateral in one go so that we can fill coin cache early
+            // and reduce further locking overhead for cs_main in other parts of code including GUI
+            LogPrintf("Filling coin cache with masternode UTXOs...\n");
+            LOCK(cs_main);
+            const auto start{SteadyClock::now()};
+            const auto mnList{node.dmnman->GetListAtChainTip()};
+            mnList.ForEachMN(/*onlyValid=*/false, [&](const auto& dmn) {
+                Coin coin;
+                GetUTXOCoin(chainman.ActiveChainstate(), dmn.collateralOutpoint, coin);
+            });
+            LogPrintf("Filling coin cache with masternode UTXOs: done in %dms\n", Ticks<std::chrono::milliseconds>(SteadyClock::now() - start));
+        }
+
+        if (fReindex || fReindexChainState) {
+            LogPrintf("Skipping evodb repair during reindex\n");
+            node.dmnman->CompleteRepair();  // Mark as repaired since we're rebuilding fresh
+        } else if (node.dmnman->IsRepaired() && !args.GetBoolArg("-forceevodbrepair", false)) {
+            LogPrintf("Masternode list diffs are already repaired\n");
+        } else {
+            const CBlockIndex* start_index;
+            const CBlockIndex* stop_index;
+            {
+                LOCK(cs_main);
+                const auto& consensus_params = Params().GetConsensus();
+                start_index = chainman.ActiveChain()[consensus_params.DIP0003Height];
+                stop_index = chainman.ActiveChain().Tip();
+            }
+
+            if (start_index && stop_index && start_index->nHeight < stop_index->nHeight) {
+                LogPrintf("Verifying and repairing masternode list diffs...\n");
+                const auto start{SteadyClock::now()};
+                // Create a callback that wraps CSpecialTxProcessor::BuildNewListFromBlock
+                auto build_list_func = [&node](const CBlock& block, const CBlockIndex* const pindexPrev,
+                                                       const CDeterministicMNList& prevList, const CCoinsViewCache& view,
+                                                       bool debugLogs, BlockValidationState& state,
+                                                       CDeterministicMNList& mnListRet) -> bool {
+                    return node.chain_helper->special_tx->RebuildListFromBlock(block, pindexPrev, prevList, view, debugLogs, state, mnListRet);
+                };
+                auto result = node.dmnman->RecalculateAndRepairDiffs(start_index, stop_index, chainman, build_list_func, true);
+
+                if (!result.verification_errors.empty()) {
+                    LogPrintf("WARNING: Verification errors:\n%s\n", Join(result.verification_errors, "\n"));
+                }
+
+                if (!result.repair_errors.empty()) {
+                    // Critical errors occurred - reindex required
+                    LogPrintf("Failed to repair masternode list diffs. Database corruption detected. " /* Continued */
+                              "Please restart with -reindex to rebuild the database.\n"
+                              "Errors:\n%s\n",
+                              Join(result.repair_errors, "\n"));
+                    StartShutdown();
+                    return;
+                }
+                node.dmnman->CompleteRepair();
+                LogPrintf("Successfully repaired %d masternode list diffs, verified %d snapshots in %ds\n",
+                          result.diffs_recalculated, result.snapshots_verified,
+                          Ticks<std::chrono::seconds>(SteadyClock::now() - start));
+            }
+        }
+
+        if (node.active_ctx) {
+            node.active_ctx->nodeman->Init(chainman.ActiveTip());
+        }
     });
+#ifdef ENABLE_WALLET
+    if (!args.GetBoolArg("-disablewallet", DEFAULT_DISABLE_WALLET)) {
+        g_wallet_init_interface.AutoLockMasternodeCollaterals(*node.wallet_loader);
+    }
+#endif // ENABLE_WALLET
 
     // Wait for genesis block to be processed
     {
@@ -2234,8 +2504,6 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     }
 
     // ********************************************************* Step 12: start node
-
-    int chain_active_height;
 
     //// debug print
     {
@@ -2270,19 +2538,21 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     connOptions.uiInterface = &uiInterface;
     connOptions.m_banman = node.banman.get();
     connOptions.m_msgproc = node.peerman.get();
-    connOptions.nSendBufferMaxSize = 1000 * args.GetArg("-maxsendbuffer", DEFAULT_MAXSENDBUFFER);
-    connOptions.nReceiveFloodSize = 1000 * args.GetArg("-maxreceivebuffer", DEFAULT_MAXRECEIVEBUFFER);
+    connOptions.nSendBufferMaxSize = 1000 * args.GetIntArg("-maxsendbuffer", DEFAULT_MAXSENDBUFFER);
+    connOptions.nReceiveFloodSize = 1000 * args.GetIntArg("-maxreceivebuffer", DEFAULT_MAXRECEIVEBUFFER);
     connOptions.m_added_nodes = args.GetArgs("-addnode");
     connOptions.nMaxOutboundLimit = *opt_max_upload;
     connOptions.m_peer_connect_timeout = peer_connect_timeout;
+    connOptions.socketEventsMode = ::g_socket_events_mode;
+    connOptions.m_active_masternode = node.active_ctx != nullptr;
 
     // Port to bind to if `-bind=addr` is provided without a `:port` suffix.
     const uint16_t default_bind_port =
-        static_cast<uint16_t>(args.GetArg("-port", Params().GetDefaultPort()));
+        static_cast<uint16_t>(args.GetIntArg("-port", Params().GetDefaultPort()));
 
     const auto BadPortWarning = [](const char* prefix, uint16_t port) {
         return strprintf(_("%s request to listen on port %u. This port is considered \"bad\" and "
-                           "thus it is unlikely that any Dash Core peers connect to it. See "
+                           "thus it is unlikely that any peer will connect to it. See "
                            "doc/p2p-bad-ports.md for details and a full list."),
                          prefix,
                          port);
@@ -2328,7 +2598,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     // Emit a warning if a bad port is given to -port= but only if -bind and -whitebind are not
     // given, because if they are, then -port= is ignored.
     if (connOptions.bind_on_any && args.IsArgSet("-port")) {
-        const uint16_t port_arg = args.GetArg("-port", 0);
+        const uint16_t port_arg = args.GetIntArg("-port", 0);
         if (IsBadPort(port_arg)) {
             InitWarning(BadPortWarning("-port", port_arg));
         }
@@ -2382,13 +2652,6 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         }
     }
 
-    std::string sem_str = args.GetArg("-socketevents", DEFAULT_SOCKETEVENTS);
-    const auto sem = SEMFromString(sem_str);
-    if (sem == SocketEventsMode::Unknown) {
-        return InitError(strprintf(_("Invalid -socketevents ('%s') specified. Only these modes are supported: %s"), sem_str, GetSupportedSocketEventsStr()));
-    }
-    connOptions.socketEventsMode = sem;
-
     const std::string& i2psam_arg = args.GetArg("-i2psam", "");
     if (!i2psam_arg.empty()) {
         const std::optional<CService> addr{Lookup(i2psam_arg, 7656, fNameLookup)};
@@ -2397,7 +2660,12 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         }
         SetProxy(NET_I2P, Proxy{addr.value()});
     } else {
-        SetReachable(NET_I2P, false);
+        if (args.IsArgSet("-onlynet") && g_reachable_nets.Contains(NET_I2P)) {
+            return InitError(
+                _("Outbound connections restricted to i2p (-onlynet=i2p) but "
+                  "-i2psam is not provided"));
+        }
+        g_reachable_nets.Remove(NET_I2P);
     }
 
     connOptions.m_i2p_accept_incoming = args.GetBoolArg("-i2pacceptincoming", DEFAULT_I2P_ACCEPT_INCOMING);

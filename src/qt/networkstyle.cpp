@@ -1,5 +1,5 @@
-// Copyright (c) 2014-2019 The Bitcoin Core developers
-// Copyright (c) 2014-2023 The Dash Core developers
+// Copyright (c) 2014-2020 The Bitcoin Core developers
+// Copyright (c) 2014-2025 The Dash Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -24,9 +24,9 @@ static const struct {
     const std::string titleAddText;
 } network_styles[] = {
     {"main", QAPP_APP_NAME_DEFAULT, 0, 0, ""},
-    {"test", QAPP_APP_NAME_TESTNET, 190, 20},
-    {"devnet", QAPP_APP_NAME_DEVNET, 190, 20, "[devnet: %s]"},
-    {"regtest", QAPP_APP_NAME_REGTEST, 160, 30}
+    {"test", QAPP_APP_NAME_TESTNET, 190, 20, ""},
+    {"devnet", QAPP_APP_NAME_DEVNET, 35, 15, "[devnet: %s]"},
+    {"regtest", QAPP_APP_NAME_REGTEST, 160, 30, ""}
 };
 
 void NetworkStyle::rotateColor(QColor& col, const int iconColorHueShift, const int iconColorSaturationReduction)

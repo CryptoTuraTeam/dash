@@ -1,4 +1,4 @@
-// Copyright (c) 2018-2020 The Bitcoin Core developers
+// Copyright (c) 2018-2021 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -8,6 +8,7 @@
 #include <key.h>
 #include <qt/bitcoin.h>
 #include <qt/bitcoingui.h>
+#include <qt/guiutil_font.h>
 #include <qt/networkstyle.h>
 #include <qt/rpcconsole.h>
 #include <shutdown.h>
@@ -59,7 +60,7 @@ void TestRpcCommand(RPCConsole* console)
 //! Entry point for BitcoinApplication tests.
 void AppTests::appTests()
 {
-#ifdef Q_OS_MAC
+#ifdef Q_OS_MACOS
     if (QApplication::platformName() == "minimal") {
         // Disable for mac on "minimal" platform to avoid crashes inside the Qt
         // framework when it tries to look up unimplemented cocoa functions,
@@ -71,15 +72,11 @@ void AppTests::appTests()
     }
 #endif
 
-    fs::create_directories([] {
-        BasicTestingSetup test{CBaseChainParams::REGTEST}; // Create a temp data directory to backup the gui settings to
-        return gArgs.GetDataDirNet() / "blocks";
-    }());
-
     qRegisterMetaType<interfaces::BlockAndHeaderTipInfo>("interfaces::BlockAndHeaderTipInfo");
     m_app.parameterSetup();
     GUIUtil::loadFonts();
-    m_app.createOptionsModel(true /* reset settings */);
+    GUIUtil::setApplicationFont();
+    QVERIFY(m_app.createOptionsModel(true /* reset settings */));
     QScopedPointer<const NetworkStyle> style(
         NetworkStyle::instantiate(Params().NetworkIDString()));
     m_app.createWindow(style.data());
@@ -122,6 +119,6 @@ AppTests::HandleCallback::~HandleCallback()
     assert(it != callbacks.end());
     callbacks.erase(it);
     if (callbacks.empty()) {
-        m_app_tests.m_app.quit();
+        m_app_tests.m_app.exit(0);
     }
 }

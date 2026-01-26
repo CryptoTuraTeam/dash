@@ -4,6 +4,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <core_io.h>
+#include <node/context.h>
 #include <policy/feerate.h>
 #include <policy/fees.h>
 #include <policy/policy.h>
@@ -21,7 +22,11 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <list>
 #include <string>
+#include <vector>
+
+using node::NodeContext;
 
 static RPCHelpMan estimatesmartfee()
 {
@@ -60,7 +65,6 @@ static RPCHelpMan estimatesmartfee()
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
     RPCTypeCheck(request.params, {UniValue::VNUM, UniValue::VSTR});
-    RPCTypeCheckArgument(request.params[0], UniValue::VNUM);
 
     CBlockPolicyEstimator& fee_estimator = EnsureAnyFeeEstimator(request.context);
     const NodeContext& node = EnsureAnyNodeContext(request.context);
@@ -82,7 +86,7 @@ static RPCHelpMan estimatesmartfee()
     FeeCalculation feeCalc;
     CFeeRate feeRate{fee_estimator.estimateSmartFee(conf_target, &feeCalc, conservative)};
     if (feeRate != CFeeRate(0)) {
-        CFeeRate min_mempool_feerate{mempool.GetMinFee(gArgs.GetArg("-maxmempool", DEFAULT_MAX_MEMPOOL_SIZE) * 1000000)};
+        CFeeRate min_mempool_feerate{mempool.GetMinFee(gArgs.GetIntArg("-maxmempool", DEFAULT_MAX_MEMPOOL_SIZE) * 1000000)};
         CFeeRate min_relay_feerate{::minRelayTxFee};
         feeRate = std::max({feeRate, min_mempool_feerate, min_relay_feerate});
         result.pushKV("feerate", ValueFromAmount(feeRate.GetFeePerK()));
@@ -152,7 +156,6 @@ static RPCHelpMan estimaterawfee()
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
     RPCTypeCheck(request.params, {UniValue::VNUM, UniValue::VNUM}, true);
-    RPCTypeCheckArgument(request.params[0], UniValue::VNUM);
 
     CBlockPolicyEstimator& fee_estimator = EnsureAnyFeeEstimator(request.context);
 

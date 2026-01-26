@@ -5,10 +5,14 @@
 #ifndef BITCOIN_ZMQ_ZMQNOTIFICATIONINTERFACE_H
 #define BITCOIN_ZMQ_ZMQNOTIFICATIONINTERFACE_H
 
+#include <primitives/transaction.h>
 #include <validationinterface.h>
+
+#include <cstdint>
 #include <list>
 #include <memory>
 
+class CBlock;
 class CBlockIndex;
 class CZMQAbstractNotifier;
 
@@ -31,17 +35,17 @@ protected:
     void BlockConnected(const std::shared_ptr<const CBlock>& pblock, const CBlockIndex* pindexConnected) override;
     void BlockDisconnected(const std::shared_ptr<const CBlock>& pblock, const CBlockIndex* pindexDisconnected) override;
     void UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *pindexFork, bool fInitialDownload) override;
-    void NotifyChainLock(const CBlockIndex *pindex, const std::shared_ptr<const llmq::CChainLockSig>& clsig) override;
-    void NotifyTransactionLock(const CTransactionRef &tx, const std::shared_ptr<const llmq::CInstantSendLock>& islock) override;
-    void NotifyGovernanceVote(const CDeterministicMNList& tip_mn_list, const std::shared_ptr<const CGovernanceVote>& vote) override;
+    void NotifyChainLock(const CBlockIndex *pindex, const std::shared_ptr<const chainlock::ChainLockSig>& clsig) override;
+    void NotifyTransactionLock(const CTransactionRef &tx, const std::shared_ptr<const instantsend::InstantSendLock>& islock) override;
+    void NotifyGovernanceVote(const std::shared_ptr<CDeterministicMNList>& tip_mn_list, const std::shared_ptr<const CGovernanceVote>& vote) override;
     void NotifyGovernanceObject(const std::shared_ptr<const Governance::Object>& object) override;
     void NotifyInstantSendDoubleSpendAttempt(const CTransactionRef& currentTx, const CTransactionRef& previousTx) override;
-    void NotifyRecoveredSig(const std::shared_ptr<const llmq::CRecoveredSig>& sig) override;
+    void NotifyRecoveredSig(const std::shared_ptr<const llmq::CRecoveredSig>& sig, bool /*proactive_relay*/) override;
 
 private:
     CZMQNotificationInterface();
 
-    void *pcontext;
+    void* pcontext{nullptr};
     std::list<std::unique_ptr<CZMQAbstractNotifier>> notifiers;
 };
 

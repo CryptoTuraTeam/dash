@@ -14,8 +14,6 @@ import sys
 
 # Disabled warnings:
 DISABLED = [
-    'SC2046', # Quote this to prevent word splitting.
-    'SC2086', # Double quote to prevent globbing and word splitting.
     'SC2162', # read without -r will mangle backslashes.
 ]
 
@@ -27,7 +25,7 @@ def check_shellcheck_install():
         sys.exit(0)
 
 def get_files(command):
-    output = subprocess.run(command, stdout=subprocess.PIPE, universal_newlines=True)
+    output = subprocess.run(command, stdout=subprocess.PIPE, text=True)
     files = output.stdout.split('\n')
 
     # remove whitespace element
@@ -70,7 +68,7 @@ def main():
     ]
     files = get_files(files_cmd)
     # remove everything that doesn't match this regex
-    reg = re.compile(r'src/[dashbls,immer,leveldb,secp256k1,minisketch,univalue]')
+    reg = re.compile(r'src/[dashbls,immer,leveldb,secp256k1,minisketch]')
     files[:] = [file for file in files if not reg.match(file)]
 
     # build the `shellcheck` command

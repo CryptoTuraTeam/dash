@@ -27,13 +27,16 @@ struct LLMQContext;
 
 namespace Consensus {
 struct Params;
-}
+} // namespace Consensus
+namespace fs {
+class path;
+} // namespace fs
 
+namespace node {
 enum class ChainstateLoadingError {
     ERROR_LOADING_BLOCK_DB,
     ERROR_BAD_GENESIS_BLOCK,
     ERROR_BAD_DEVNET_GENESIS_BLOCK,
-    ERROR_TXINDEX_DISABLED_WHEN_GOV_ENABLED,
     ERROR_ADDRIDX_NEEDS_REINDEX,
     ERROR_SPENTIDX_NEEDS_REINDEX,
     ERROR_TIMEIDX_NEEDS_REINDEX,
@@ -81,7 +84,6 @@ std::optional<ChainstateLoadingError> LoadChainstate(bool fReset,
                                                      CMasternodeMetaMan& mn_metaman,
                                                      CMasternodeSync& mn_sync,
                                                      CSporkManager& sporkman,
-                                                     std::unique_ptr<CActiveMasternodeManager>& mn_activeman,
                                                      std::unique_ptr<CChainstateHelper>& chain_helper,
                                                      std::unique_ptr<CCreditPoolManager>& cpoolman,
                                                      std::unique_ptr<CDeterministicMNManager>& dmnman,
@@ -89,20 +91,21 @@ std::optional<ChainstateLoadingError> LoadChainstate(bool fReset,
                                                      std::unique_ptr<CMNHFManager>& mnhf_manager,
                                                      std::unique_ptr<LLMQContext>& llmq_ctx,
                                                      CTxMemPool* mempool,
+                                                     const fs::path& data_dir,
                                                      bool fPruneMode,
                                                      bool is_addrindex_enabled,
-                                                     bool is_governance_enabled,
                                                      bool is_spentindex_enabled,
                                                      bool is_timeindex_enabled,
-                                                     bool is_txindex_enabled,
                                                      const Consensus::Params& consensus_params,
-                                                     const std::string& network_id,
                                                      bool fReindexChainState,
                                                      int64_t nBlockTreeDBCache,
                                                      int64_t nCoinDBCache,
                                                      int64_t nCoinCacheUsage,
                                                      bool block_tree_db_in_memory,
                                                      bool coins_db_in_memory,
+                                                     bool dash_dbs_in_memory,
+                                                     int8_t bls_threads,
+                                                     int64_t max_recsigs_age,
                                                      std::function<bool()> shutdown_requested = nullptr,
                                                      std::function<void()> coins_error_cb = nullptr);
 
@@ -112,7 +115,6 @@ void DashChainstateSetup(ChainstateManager& chainman,
                          CMasternodeMetaMan& mn_metaman,
                          CMasternodeSync& mn_sync,
                          CSporkManager& sporkman,
-                         std::unique_ptr<CActiveMasternodeManager>& mn_activeman,
                          std::unique_ptr<CChainstateHelper>& chain_helper,
                          std::unique_ptr<CCreditPoolManager>& cpoolman,
                          std::unique_ptr<CDeterministicMNManager>& dmnman,
@@ -120,8 +122,11 @@ void DashChainstateSetup(ChainstateManager& chainman,
                          std::unique_ptr<CMNHFManager>& mnhf_manager,
                          std::unique_ptr<LLMQContext>& llmq_ctx,
                          CTxMemPool* mempool,
-                         bool fReset,
-                         bool fReindexChainState,
+                         const fs::path& data_dir,
+                         bool llmq_dbs_in_memory,
+                         bool llmq_dbs_wipe,
+                         int8_t bls_threads,
+                         int64_t max_recsigs_age,
                          const Consensus::Params& consensus_params);
 
 void DashChainstateSetupClose(std::unique_ptr<CChainstateHelper>& chain_helper,
@@ -147,5 +152,6 @@ std::optional<ChainstateLoadVerifyError> VerifyLoadedChainstate(ChainstateManage
                                                                 int check_level,
                                                                 std::function<int64_t()> get_unix_time_seconds,
                                                                 std::function<void(bool)> notify_bls_state = nullptr);
+} // namespace node
 
 #endif // BITCOIN_NODE_CHAINSTATE_H

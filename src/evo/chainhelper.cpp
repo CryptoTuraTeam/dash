@@ -4,10 +4,12 @@
 
 #include <evo/chainhelper.h>
 
-#include <consensus/params.h>
+#include <chainparams.h>
+
+#include <chainlock/chainlock.h>
 #include <evo/specialtxman.h>
-#include <llmq/chainlocks.h>
-#include <llmq/instantsend.h>
+#include <instantsend/instantsend.h>
+#include <instantsend/lock.h>
 #include <masternode/payments.h>
 
 CChainstateHelper::CChainstateHelper(CCreditPoolManager& cpoolman, CDeterministicMNManager& dmnman,
@@ -36,7 +38,7 @@ bool CChainstateHelper::HasChainLock(int nHeight, const uint256& blockHash) cons
     return clhandler.HasChainLock(nHeight, blockHash);
 }
 
-int32_t CChainstateHelper::GetBestChainLockHeight() const { return clhandler.GetBestChainLock().getHeight(); }
+int32_t CChainstateHelper::GetBestChainLockHeight() const { return clhandler.GetBestChainLockHeight(); }
 
 /** Passthrough functions to CInstantSendManager */
 std::optional<std::pair</*islock_hash=*/uint256, /*txid=*/uint256>> CChainstateHelper::ConflictingISLockIfAny(
@@ -58,3 +60,4 @@ bool CChainstateHelper::RemoveConflictingISLockByTx(const CTransaction& tx)
 }
 
 bool CChainstateHelper::ShouldInstantSendRejectConflicts() const { return isman.RejectConflictingBlocks(); }
+

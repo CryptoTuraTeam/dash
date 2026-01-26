@@ -28,7 +28,7 @@ static void LoadExternalBlockFile(benchmark::Bench& bench)
     // block data) as a stream object.
     const fs::path blkfile{testing_setup.get()->m_path_root / "blk.dat"};
     CDataStream ss(SER_DISK, 0);
-    auto params{Params()};
+    const auto& params{Params()};
     ss << params.MessageStart();
     ss << static_cast<uint32_t>(benchmark::data::block813851.size());
     // We can't use the streaming serialization (ss << benchmark::data::block813851)
@@ -40,7 +40,7 @@ static void LoadExternalBlockFile(benchmark::Bench& bench)
         // "wb+" is "binary, O_RDWR | O_CREAT | O_TRUNC".
         FILE* file{fsbridge::fopen(blkfile, "wb+")};
         // Make the test block file about 128 MB in length.
-        for (size_t i = 0; i < MAX_BLOCKFILE_SIZE / ss.size(); ++i) {
+        for (size_t i = 0; i < node::MAX_BLOCKFILE_SIZE / ss.size(); ++i) {
             if (fwrite(ss.data(), 1, ss.size(), file) != ss.size()) {
                 throw std::runtime_error("write to test file failed\n");
             }

@@ -5,6 +5,7 @@
 #include <net_processing.h>
 #include <netaddress.h>
 #include <netmessagemaker.h>
+#include <pubkey.h>
 #include <test/fuzz/util.h>
 #include <test/util/script.h>
 #include <util/overflow.h>
@@ -22,21 +23,16 @@ FuzzedSock::FuzzedSock(FuzzedDataProvider& fuzzed_data_provider)
 FuzzedSock::~FuzzedSock()
 {
     // Sock::~Sock() will be called after FuzzedSock::~FuzzedSock() and it will call
-    // Sock::Reset() (not FuzzedSock::Reset()!) which will call CloseSocket(m_socket).
+    // close(m_socket) if m_socket is not INVALID_SOCKET.
     // Avoid closing an arbitrary file descriptor (m_socket is just a random very high number which
     // theoretically may concide with a real opened file descriptor).
-    Reset();
+    m_socket = INVALID_SOCKET;
 }
 
 FuzzedSock& FuzzedSock::operator=(Sock&& other)
 {
     assert(false && "Move of Sock into FuzzedSock not allowed.");
     return *this;
-}
-
-void FuzzedSock::Reset()
-{
-    m_socket = INVALID_SOCKET;
 }
 
 ssize_t FuzzedSock::Send(const void* data, size_t len, int flags) const
@@ -270,12 +266,12 @@ bool FuzzedSock::SetNonBlocking() const
     return true;
 }
 
-bool FuzzedSock::IsSelectable() const
+bool FuzzedSock::IsSelectable(bool is_select) const
 {
     return m_selectable;
 }
 
-bool FuzzedSock::Wait(std::chrono::milliseconds timeout, Event requested, Event* occurred) const
+bool FuzzedSock::Wait(std::chrono::milliseconds timeout, Event requested, SocketEventsParams event_params, Event* occurred) const
 {
     constexpr std::array wait_errnos{
         EBADF,
@@ -288,6 +284,15 @@ bool FuzzedSock::Wait(std::chrono::milliseconds timeout, Event requested, Event*
     }
     if (occurred != nullptr) {
         *occurred = m_fuzzed_data_provider.ConsumeBool() ? requested : 0;
+    }
+    return true;
+}
+
+bool FuzzedSock::WaitMany(std::chrono::milliseconds timeout, EventsPerSock& events_per_sock, SocketEventsParams event_params) const
+{
+    for (auto& [sock, events] : events_per_sock) {
+        (void)sock;
+        events.occurred = m_fuzzed_data_provider.ConsumeBool() ? events.requested : 0;
     }
     return true;
 }
@@ -319,8 +324,8 @@ CAmount ConsumeMoney(FuzzedDataProvider& fuzzed_data_provider, const std::option
 int64_t ConsumeTime(FuzzedDataProvider& fuzzed_data_provider, const std::optional<int64_t>& min, const std::optional<int64_t>& max) noexcept
 {
     // Avoid t=0 (1970-01-01T00:00:00Z) since SetMockTime(0) disables mocktime.
-    static const int64_t time_min{ParseISO8601DateTime("2000-01-01T00:00:01Z")};
-    static const int64_t time_max{ParseISO8601DateTime("2100-12-31T23:59:59Z")};
+    static const int64_t time_min{946684801}; // 2000-01-01T00:00:01Z
+    static const int64_t time_max{4133980799}; // 2100-12-31T23:59:59Z
     return fuzzed_data_provider.ConsumeIntegralInRange<int64_t>(min.value_or(time_min), max.value_or(time_max));
 }
 
@@ -349,16 +354,76 @@ CMutableTransaction ConsumeTransaction(FuzzedDataProvider& fuzzed_data_provider,
     }
     for (int i = 0; i < num_out; ++i) {
         const auto amount = fuzzed_data_provider.ConsumeIntegralInRange<CAmount>(-10, 50 * COIN + 10);
-        const auto script_pk = ConsumeScript(fuzzed_data_provider, /* max_length */ 128);
+        const auto script_pk = ConsumeScript(fuzzed_data_provider);
         tx_mut.vout.emplace_back(amount, script_pk);
     }
     return tx_mut;
 }
 
-CScript ConsumeScript(FuzzedDataProvider& fuzzed_data_provider, const std::optional<size_t>& max_length) noexcept
+CScript ConsumeScript(FuzzedDataProvider& fuzzed_data_provider) noexcept
 {
-    const std::vector<uint8_t> b = ConsumeRandomLengthByteVector(fuzzed_data_provider, max_length);
-    return {b.begin(), b.end()};
+    CScript r_script{};
+    {
+        // Keep a buffer of bytes to allow the fuzz engine to produce smaller
+        // inputs to generate CScripts with repeated data.
+        static constexpr unsigned MAX_BUFFER_SZ{128};
+        std::vector<uint8_t> buffer(MAX_BUFFER_SZ, uint8_t{'a'});
+        while (fuzzed_data_provider.ConsumeBool()) {
+            CallOneOf(
+                fuzzed_data_provider,
+                [&] {
+                    // Insert byte vector directly to allow malformed or unparsable scripts
+                    r_script.insert(r_script.end(), buffer.begin(), buffer.begin() + fuzzed_data_provider.ConsumeIntegralInRange(0U, MAX_BUFFER_SZ));
+                },
+                [&] {
+                    // Push a byte vector from the buffer
+                    r_script << std::vector<uint8_t>{buffer.begin(), buffer.begin() + fuzzed_data_provider.ConsumeIntegralInRange(0U, MAX_BUFFER_SZ)};
+                },
+                [&] {
+                    // Push multisig
+                    // There is a special case for this to aid the fuzz engine
+                    // navigate the highly structured multisig format.
+                    r_script << fuzzed_data_provider.ConsumeIntegralInRange<int64_t>(0, 22);
+                    int num_data{fuzzed_data_provider.ConsumeIntegralInRange(1, 22)};
+                    std::vector<uint8_t> pubkey_comp{buffer.begin(), buffer.begin() + CPubKey::COMPRESSED_SIZE};
+                    pubkey_comp.front() = fuzzed_data_provider.ConsumeIntegralInRange(2, 3); // Set first byte for GetLen() to pass
+                    std::vector<uint8_t> pubkey_uncomp{buffer.begin(), buffer.begin() + CPubKey::SIZE};
+                    pubkey_uncomp.front() = fuzzed_data_provider.ConsumeIntegralInRange(4, 7); // Set first byte for GetLen() to pass
+                    while (num_data--) {
+                        auto& pubkey{fuzzed_data_provider.ConsumeBool() ? pubkey_uncomp : pubkey_comp};
+                        if (fuzzed_data_provider.ConsumeBool()) {
+                            pubkey.back() = num_data; // Make each pubkey different
+                        }
+                        r_script << pubkey;
+                    }
+                    r_script << fuzzed_data_provider.ConsumeIntegralInRange<int64_t>(0, 22);
+                },
+                [&] {
+                    // Mutate the buffer
+                    const auto vec{ConsumeRandomLengthByteVector(fuzzed_data_provider, /*max_length=*/MAX_BUFFER_SZ)};
+                    std::copy(vec.begin(), vec.end(), buffer.begin());
+                },
+                [&] {
+                    // Push an integral
+                    r_script << fuzzed_data_provider.ConsumeIntegral<int64_t>();
+                },
+                [&] {
+                    // Push an opcode
+                    r_script << ConsumeOpcodeType(fuzzed_data_provider);
+                },
+                [&] {
+                    // Push a scriptnum
+                    r_script << ConsumeScriptNum(fuzzed_data_provider);
+                });
+        }
+    }
+    if (fuzzed_data_provider.ConsumeBool()) {
+        uint256 script_hash;
+        CSHA256().Write(r_script.data(), r_script.size()).Finalize(script_hash.begin());
+        r_script.clear();
+        r_script << OP_0 << ToByteVector(script_hash);
+    }
+    return r_script;
 }
 
 uint32_t ConsumeSequence(FuzzedDataProvider& fuzzed_data_provider) noexcept
@@ -369,6 +434,24 @@ uint32_t ConsumeSequence(FuzzedDataProvider& fuzzed_data_provider) noexcept
                    CTxIn::MAX_SEQUENCE_NONFINAL,
                }) :
                fuzzed_data_provider.ConsumeIntegral<uint32_t>();
+}
+
+CTxDestination ConsumeTxDestination(FuzzedDataProvider& fuzzed_data_provider) noexcept
+{
+    CTxDestination tx_destination;
+    const size_t call_size{CallOneOf(
+        fuzzed_data_provider,
+        [&] {
+            tx_destination = CNoDestination{};
+        },
+        [&] {
+            tx_destination = PKHash{ConsumeUInt160(fuzzed_data_provider)};
+        },
+        [&] {
+            tx_destination = ScriptHash{ConsumeUInt160(fuzzed_data_provider)};
+        })};
+    Assert(call_size == std::variant_size_v<CTxDestination>);
+    return tx_destination;
 }
 
 CKey ConsumePrivateKey(FuzzedDataProvider& fuzzed_data_provider, std::optional<bool> compressed) noexcept

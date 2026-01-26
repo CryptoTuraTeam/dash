@@ -1,4 +1,4 @@
-// Copyright (c) 2011-2020 The Bitcoin Core developers
+// Copyright (c) 2011-2021 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -11,13 +11,11 @@
 
 #include <utility>
 
-#include <QList>
 #include <QTimer>
 
-PeerTableModel::PeerTableModel(interfaces::Node& node, QObject* parent) :
-    QAbstractTableModel(parent),
-    m_node(node),
-    timer(nullptr)
+PeerTableModel::PeerTableModel(interfaces::Node& node, QObject* parent)
+    : QAbstractTableModel(parent),
+      m_node(node)
 {
     // set up timer for auto refresh
     timer = new QTimer(this);
@@ -28,10 +26,7 @@ PeerTableModel::PeerTableModel(interfaces::Node& node, QObject* parent) :
     refresh();
 }
 
-PeerTableModel::~PeerTableModel()
-{
-    // Intentionally left empty
-}
+PeerTableModel::~PeerTableModel() = default;
 
 void PeerTableModel::startAutoRefresh()
 {
@@ -82,7 +77,7 @@ QVariant PeerTableModel::data(const QModelIndex& index, int role) const
                                //: An Outbound Connection to a Peer.
                                tr("Outbound"));
         case ConnectionType:
-            return GUIUtil::ConnectionTypeToQString(rec->nodeStats.m_conn_type, /* prepend_direction */ false);
+            return GUIUtil::ConnectionTypeToQString(rec->nodeStats.m_conn_type, /*prepend_direction=*/false);
         case Network:
             return GUIUtil::NetworkToQString(rec->nodeStats.m_network);
         case Ping:

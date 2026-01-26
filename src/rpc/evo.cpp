@@ -2,7 +2,6 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-#include <base58.h>
 #include <bls/bls.h>
 #include <chainparams.h>
 #include <consensus/validation.h>
@@ -12,37 +11,52 @@
 #include <evo/deterministicmns.h>
 #include <evo/dmn_types.h>
 #include <evo/providertx.h>
-#include <evo/simplifiedmns.h>
+#include <evo/smldiff.h>
 #include <evo/specialtx.h>
 #include <evo/specialtxman.h>
 #include <index/txindex.h>
-#include <llmq/blockprocessor.h>
 #include <llmq/context.h>
 #include <masternode/meta.h>
-#include <messagesigner.h>
-#include <netbase.h>
 #include <node/context.h>
-#include <rpc/blockchain.h>
+#include <rpc/evo_util.h>
 #include <rpc/server.h>
 #include <rpc/server_util.h>
 #include <rpc/util.h>
 #include <util/check.h>
-#include <util/moneystr.h>
 #include <util/translation.h>
 #include <validation.h>
+#include <wallet/rpc/util.h>
+#include <walletinitinterface.h>
 
 #ifdef ENABLE_WALLET
 #include <wallet/coincontrol.h>
-#include <wallet/rpcwallet.h>
+#include <wallet/spend.h>
 #include <wallet/wallet.h>
-#endif//ENABLE_WALLET
+#endif // ENABLE_WALLET
 
 #ifdef ENABLE_WALLET
-extern RPCHelpMan signrawtransaction();
 extern RPCHelpMan sendrawtransaction();
+namespace wallet {
+extern RPCHelpMan signrawtransactionwithwallet();
+} // namespace wallet
 #else
+namespace wallet {
 class CWallet;
-#endif//ENABLE_WALLET
+} // namespace wallet
+#endif // ENABLE_WALLET
+
+using node::GetTransaction;
+using node::NodeContext;
+using wallet::CWallet;
+#ifdef ENABLE_WALLET
+using wallet::CCoinControl;
+using wallet::CRecipient;
+using wallet::DEFAULT_DISABLE_WALLET;
+using wallet::GetWalletForJSONRPCRequest;
+using wallet::HELP_REQUIRING_PASSPHRASE;
+using wallet::isminetype;
+using wallet::RANDOM_CHANGE_POSITION;
+#endif // ENABLE_WALLET
 
 static RPCArg GetRpcArg(const std::string& strParamName)
 {
@@ -71,14 +85,20 @@ static RPCArg GetRpcArg(const std::string& strParamName)
                 "If not specified, payoutAddress is the one that is going to be used.\n"
                 "The private key belonging to this address must be known in your wallet."}
         },
-        {"ipAndPort",
-            {"ipAndPort", RPCArg::Type::STR, RPCArg::Optional::NO,
-                "IP and port in the form \"IP:PORT\". Must be unique on the network.\n"
-                "Can be set to an empty string, which will require a ProUpServTx afterwards."}
+        {"coreP2PAddrs",
+            {"coreP2PAddrs", RPCArg::Type::ARR, RPCArg::Optional::NO,
+                "Array of addresses in the form \"ADDR:PORT\". Must be unique on the network.\n"
+                "Can be set to an empty string, which will require a ProUpServTx afterwards.",
+                {
+                    {"address", RPCArg::Type::STR, RPCArg::Optional::NO, ""},
+                }}
         },
-        {"ipAndPort_update",
-            {"ipAndPort", RPCArg::Type::STR, RPCArg::Optional::NO,
-                "IP and port in the form \"IP:PORT\". Must be unique on the network."}
+        {"coreP2PAddrs_update",
+            {"coreP2PAddrs", RPCArg::Type::ARR, RPCArg::Optional::NO,
+                "Array of addresses in the form \"ADDR:PORT\". Must be unique on the network.",
+                {
+                    {"address", RPCArg::Type::STR, RPCArg::Optional::NO, ""},
+                }}
         },
         {"operatorKey",
             {"operatorKey", RPCArg::Type::STR, RPCArg::Optional::NO,
@@ -161,13 +181,37 @@ static RPCArg GetRpcArg(const std::string& strParamName)
             {"platformNodeID", RPCArg::Type::STR, RPCArg::Optional::NO,
                 "Platform P2P node ID, derived from P2P public key."}
         },
-        {"platformP2PPort",
-            {"platformP2PPort", RPCArg::Type::NUM, RPCArg::Optional::NO,
-                "TCP port of Dash Platform peer-to-peer communication between nodes (network byte order)."}
+        {"platformP2PAddrs",
+            {"platformP2PAddrs", RPCArg::Type::ARR, RPCArg::Optional::NO,
+                "Array of addresses in the form \"ADDR:PORT\" used by Platform for peer-to-peer connection.\n"
+                "Must be unique on the network. Can be set to an empty string, which will require a ProUpServTx afterwards.",
+                {
+                    {"address", RPCArg::Type::STR, RPCArg::Optional::NO, ""},
+                }}
         },
-        {"platformHTTPPort",
-            {"platformHTTPPort", RPCArg::Type::NUM, RPCArg::Optional::NO,
-                "TCP port of Platform HTTP/API interface (network byte order)."}
+        {"platformP2PAddrs_update",
+            {"platformP2PAddrs", RPCArg::Type::ARR, RPCArg::Optional::NO,
+                "Array of addresses in the form \"ADDR:PORT\" used by Platform for peer-to-peer connection.\n"
+                "Must be unique on the network.",
+                {
+                    {"address", RPCArg::Type::STR, RPCArg::Optional::NO, ""},
+                }}
+        },
+        {"platformHTTPSAddrs",
+            {"platformHTTPSAddrs", RPCArg::Type::ARR, RPCArg::Optional::NO,
+                "Array of addresses in the form \"ADDR:PORT\" used by Platform for their HTTPS API.\n"
+                "Must be unique on the network. Can be set to an empty string, which will require a ProUpServTx afterwards.",
+                {
+                    {"address", RPCArg::Type::STR, RPCArg::Optional::NO, ""},
+                }}
+        },
+        {"platformHTTPSAddrs_update",
+            {"platformHTTPSAddrs", RPCArg::Type::ARR, RPCArg::Optional::NO,
+                "Array of addresses in the form \"ADDR:PORT\" used by Platform for their HTTPS API.\n"
+                "Must be unique on the network.",
+                {
+                    {"address", RPCArg::Type::STR, RPCArg::Optional::NO, ""},
+                }}
         },
     };
 
@@ -177,6 +221,19 @@ static RPCArg GetRpcArg(const std::string& strParamName)
 
     return it->second;
 }
+
+static CBLSSecretKey ParseBLSSecretKey(const std::string& hexKey, const std::string& paramName)
+{
+    CBLSSecretKey secKey;
+
+    // Actually, bool flag for bls::PrivateKey has other meaning (modOrder)
+    if (!secKey.SetHexStr(hexKey, false)) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("%s must be a valid BLS secret key", paramName));
+    }
+    return secKey;
+}
+
+#ifdef ENABLE_WALLET
 
 static CKeyID ParsePubKeyIDFromAddress(const std::string& strAddress, const std::string& paramName)
 {
@@ -196,24 +253,6 @@ static CBLSPublicKey ParseBLSPubKey(const std::string& hexKey, const std::string
     }
     return pubKey;
 }
-
-static CBLSSecretKey ParseBLSSecretKey(const std::string& hexKey, const std::string& paramName)
-{
-    CBLSSecretKey secKey;
-
-    // Actually, bool flag for bls::PrivateKey has other meaning (modOrder)
-    if (!secKey.SetHexStr(hexKey, false)) {
-        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("%s must be a valid BLS secret key", paramName));
-    }
-    return secKey;
-}
-
-static bool ValidatePlatformPort(const int32_t port)
-{
-    return port >= 1 && port <= std::numeric_limits<uint16_t>::max();
-}
-
-#ifdef ENABLE_WALLET
 
 template <typename SpecialTxPayload>
 static void FundSpecialTx(CWallet& wallet, CMutableTransaction& tx, const SpecialTxPayload& payload,
@@ -253,13 +292,10 @@ static void FundSpecialTx(CWallet& wallet, CMutableTransaction& tx, const Specia
     coinControl.destChange = fundDest;
     coinControl.fRequireAllInputs = false;
 
-    std::vector<COutput> vecOutputs;
-    wallet.AvailableCoins(vecOutputs);
-
-    for (const auto& out : vecOutputs) {
+    for (const auto& out : AvailableCoinsListUnspent(wallet).all()) {
         CTxDestination txDest;
-        if (ExtractDestination(out.tx->tx->vout[out.i].scriptPubKey, txDest) && txDest == fundDest) {
-            coinControl.Select(COutPoint(out.tx->tx->GetHash(), out.i));
+        if (ExtractDestination(out.txout.scriptPubKey, txDest) && txDest == fundDest) {
+            coinControl.Select(out.outpoint);
         }
     }
 
@@ -267,16 +303,12 @@ static void FundSpecialTx(CWallet& wallet, CMutableTransaction& tx, const Specia
         throw JSONRPCError(RPC_INTERNAL_ERROR, strprintf("No funds at specified address %s", EncodeDestination(fundDest)));
     }
 
-    CTransactionRef newTx;
-    CAmount nFee;
-    int nChangePos = -1;
-    bilingual_str strFailReason;
-
-    FeeCalculation fee_calc_out;
-    if (!wallet.CreateTransaction(vecSend, newTx, nFee, nChangePos, strFailReason, coinControl, fee_calc_out, false, tx.vExtraPayload.size())) {
-        throw JSONRPCError(RPC_INTERNAL_ERROR, strFailReason.original);
+    auto res = CreateTransaction(wallet, vecSend, RANDOM_CHANGE_POSITION, coinControl, /*sign=*/true, tx.vExtraPayload.size());
+    if (!res) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR, util::ErrorString(res).original);
     }
 
+    const CTransactionRef& newTx = res->tx;
     tx.vin = newTx->vin;
     tx.vout = newTx->vout;
 
@@ -317,10 +349,10 @@ static void SignSpecialTxPayloadByHash(const CMutableTransaction& tx, SpecialTxP
     payload.sig = key.Sign(hash, use_legacy);
 }
 
-static std::string SignAndSendSpecialTx(const JSONRPCRequest& request, CChainstateHelper& chain_helper, const ChainstateManager& chainman, const CMutableTransaction& tx, bool fSubmit = true)
+static std::string SignAndSendSpecialTx(const JSONRPCRequest& request, CChainstateHelper& chain_helper, const ChainstateManager& chainman, const CMutableTransaction& tx, bool fSubmit)
 {
     {
-    LOCK(cs_main);
+    LOCK(::cs_main);
 
     TxValidationState state;
     if (!chain_helper.special_tx->CheckSpecialTx(CTransaction(tx), chainman.ActiveChain().Tip(), chainman.ActiveChainstate().CoinsTip(), true, state)) {
@@ -334,7 +366,7 @@ static std::string SignAndSendSpecialTx(const JSONRPCRequest& request, CChainsta
     JSONRPCRequest signRequest(request);
     signRequest.params.setArray();
     signRequest.params.push_back(HexStr(ds));
-    UniValue signResult = signrawtransactionwithwallet().HandleRequest(signRequest);
+    UniValue signResult = wallet::signrawtransactionwithwallet().HandleRequest(signRequest);
 
     if (!fSubmit) {
         return signResult["hex"].get_str();
@@ -343,7 +375,7 @@ static std::string SignAndSendSpecialTx(const JSONRPCRequest& request, CChainsta
     JSONRPCRequest sendRequest(request);
     sendRequest.params.setArray();
     sendRequest.params.push_back(signResult["hex"].get_str());
-    return sendrawtransaction().HandleRequest(sendRequest).get_str();
+    return ::sendrawtransaction().HandleRequest(sendRequest).get_str();
 }
 
 // forward declaration
@@ -376,10 +408,11 @@ static RPCHelpMan protx_register_fund_wrapper(const bool legacy)
         "masternode.\n"
         "A few of the limitations you see in the arguments are temporary and might be lifted after DIP3\n"
         "is fully deployed.\n"
+        + std::string(legacy ? "\nDEPRECATED: May be removed in a future version, pass config option -deprecatedrpc=legacy_mn to use RPC\n" : "")
         + HELP_REQUIRING_PASSPHRASE,
         {
             GetRpcArg("collateralAddress"),
-            GetRpcArg("ipAndPort"),
+            GetRpcArg("coreP2PAddrs"),
             GetRpcArg("ownerAddress"),
             legacy ? GetRpcArg("operatorPubKey_register_legacy") : GetRpcArg("operatorPubKey_register"),
             GetRpcArg("votingAddress_register"),
@@ -399,6 +432,9 @@ static RPCHelpMan protx_register_fund_wrapper(const bool legacy)
         },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
+    if (legacy && !IsDeprecatedRPCEnabled("legacy_mn")) {
+        throw std::runtime_error("DEPRECATED: Pass config option -deprecatedrpc=legacy_mn to enable this RPC");
+    }
     return protx_register_common_wrapper(request, self.m_name == "protx register_fund_legacy", ProTxRegisterAction::Fund, MnType::Regular);
 },
     };
@@ -422,11 +458,12 @@ static RPCHelpMan protx_register_wrapper(bool legacy)
         "\nSame as \"protx register_fund\", but with an externally referenced collateral.\n"
         "The collateral is specified through \"collateralHash\" and \"collateralIndex\" and must be an unspent\n"
         "transaction output spendable by this wallet. It must also not be used by any other masternode.\n"
+        + std::string(legacy ? "\nDEPRECATED: May be removed in a future version, pass config option -deprecatedrpc=legacy_mn to use RPC\n" : "")
         + HELP_REQUIRING_PASSPHRASE,
         {
             GetRpcArg("collateralHash"),
             GetRpcArg("collateralIndex"),
-            GetRpcArg("ipAndPort"),
+            GetRpcArg("coreP2PAddrs"),
             GetRpcArg("ownerAddress"),
             legacy ? GetRpcArg("operatorPubKey_register_legacy") : GetRpcArg("operatorPubKey_register"),
             GetRpcArg("votingAddress_register"),
@@ -446,6 +483,9 @@ static RPCHelpMan protx_register_wrapper(bool legacy)
         },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
+    if (legacy && !IsDeprecatedRPCEnabled("legacy_mn")) {
+        throw std::runtime_error("DEPRECATED: Pass config option -deprecatedrpc=legacy_mn to enable this RPC");
+    }
     return protx_register_common_wrapper(request, self.m_name == "protx register_legacy", ProTxRegisterAction::External, MnType::Regular);
 },
     };
@@ -470,11 +510,12 @@ static RPCHelpMan protx_register_prepare_wrapper(const bool legacy)
     return RPCHelpMan{rpc_full_name,
         "\nCreates an unsigned ProTx and a message that must be signed externally\n"
         "with the private key that corresponds to collateralAddress to prove collateral ownership.\n"
-        "The prepared transaction will also contain inputs and outputs to cover fees.\n",
+        "The prepared transaction will also contain inputs and outputs to cover fees.\n"
+        + std::string(legacy ? "\nDEPRECATED: May be removed in a future version, pass config option -deprecatedrpc=legacy_mn to use RPC\n" : ""),
         {
             GetRpcArg("collateralHash"),
             GetRpcArg("collateralIndex"),
-            GetRpcArg("ipAndPort"),
+            GetRpcArg("coreP2PAddrs"),
             GetRpcArg("ownerAddress"),
             legacy ? GetRpcArg("operatorPubKey_register_legacy") : GetRpcArg("operatorPubKey_register"),
             GetRpcArg("votingAddress_register"),
@@ -494,6 +535,9 @@ static RPCHelpMan protx_register_prepare_wrapper(const bool legacy)
         },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
+    if (legacy && !IsDeprecatedRPCEnabled("legacy_mn")) {
+        throw std::runtime_error("DEPRECATED: Pass config option -deprecatedrpc=legacy_mn to enable this RPC");
+    }
     return protx_register_common_wrapper(request, self.m_name == "protx register_prepare_legacy", ProTxRegisterAction::Prepare, MnType::Regular);
 },
     };
@@ -522,23 +566,23 @@ static RPCHelpMan protx_register_fund_evo()
             HELP_REQUIRING_PASSPHRASE,
         {
             GetRpcArg("collateralAddress"),
-            GetRpcArg("ipAndPort"),
+            GetRpcArg("coreP2PAddrs"),
             GetRpcArg("ownerAddress"),
             GetRpcArg("operatorPubKey_register"),
             GetRpcArg("votingAddress_register"),
             GetRpcArg("operatorReward"),
             GetRpcArg("payoutAddress_register"),
             GetRpcArg("platformNodeID"),
-            GetRpcArg("platformP2PPort"),
-            GetRpcArg("platformHTTPPort"),
+            GetRpcArg("platformP2PAddrs"),
+            GetRpcArg("platformHTTPSAddrs"),
             GetRpcArg("fundAddress"),
             GetRpcArg("submit"),
         },
         {
             RPCResult{"if \"submit\" is not set or set to true",
-                      RPCResult::Type::STR_HEX, "txid", "The transaction id"},
+                RPCResult::Type::STR_HEX, "txid", "The transaction id"},
             RPCResult{"if \"submit\" is set to false",
-                      RPCResult::Type::STR_HEX, "hex", "The serialized signed ProTx in hex format"},
+                RPCResult::Type::STR_HEX, "hex", "The serialized signed ProTx in hex format"},
         },
         RPCExamples{
             HelpExampleCli("protx", "register_fund_evo \"" + EXAMPLE_ADDRESS[0] + "\" \"1.2.3.4:1234\" \"" + EXAMPLE_ADDRESS[1] + "\" \"93746e8731c57f87f79b3620a7982924e2931717d49540a85864bd543de11c43fb868fd63e501a1db37e19ed59ae6db4\" \"" + EXAMPLE_ADDRESS[1] + "\" 0 \"" + EXAMPLE_ADDRESS[0] + "\" \"f2dbd9b0a1f541a7c44d34a58674d0262f5feca5\" 22821 22822")},
@@ -561,23 +605,23 @@ static RPCHelpMan protx_register_evo()
         {
             GetRpcArg("collateralHash"),
             GetRpcArg("collateralIndex"),
-            GetRpcArg("ipAndPort"),
+            GetRpcArg("coreP2PAddrs"),
             GetRpcArg("ownerAddress"),
             GetRpcArg("operatorPubKey_register"),
             GetRpcArg("votingAddress_register"),
             GetRpcArg("operatorReward"),
             GetRpcArg("payoutAddress_register"),
             GetRpcArg("platformNodeID"),
-            GetRpcArg("platformP2PPort"),
-            GetRpcArg("platformHTTPPort"),
+            GetRpcArg("platformP2PAddrs"),
+            GetRpcArg("platformHTTPSAddrs"),
             GetRpcArg("feeSourceAddress"),
             GetRpcArg("submit"),
         },
         {
             RPCResult{"if \"submit\" is not set or set to true",
-                      RPCResult::Type::STR_HEX, "txid", "The transaction id"},
+                RPCResult::Type::STR_HEX, "txid", "The transaction id"},
             RPCResult{"if \"submit\" is set to false",
-                      RPCResult::Type::STR_HEX, "hex", "The serialized signed ProTx in hex format"},
+                RPCResult::Type::STR_HEX, "hex", "The serialized signed ProTx in hex format"},
         },
         RPCExamples{
             HelpExampleCli("protx", "register_evo \"0123456701234567012345670123456701234567012345670123456701234567\" 0 \"1.2.3.4:1234\" \"" + EXAMPLE_ADDRESS[1] + "\" \"93746e8731c57f87f79b3620a7982924e2931717d49540a85864bd543de11c43fb868fd63e501a1db37e19ed59ae6db4\" \"" + EXAMPLE_ADDRESS[1] + "\" 0 \"" + EXAMPLE_ADDRESS[0] + "\" \"f2dbd9b0a1f541a7c44d34a58674d0262f5feca5\" 22821 22822")},
@@ -599,15 +643,15 @@ static RPCHelpMan protx_register_prepare_evo()
         {
             GetRpcArg("collateralHash"),
             GetRpcArg("collateralIndex"),
-            GetRpcArg("ipAndPort"),
+            GetRpcArg("coreP2PAddrs"),
             GetRpcArg("ownerAddress"),
             GetRpcArg("operatorPubKey_register"),
             GetRpcArg("votingAddress_register"),
             GetRpcArg("operatorReward"),
             GetRpcArg("payoutAddress_register"),
             GetRpcArg("platformNodeID"),
-            GetRpcArg("platformP2PPort"),
-            GetRpcArg("platformHTTPPort"),
+            GetRpcArg("platformP2PAddrs"),
+            GetRpcArg("platformHTTPSAddrs"),
             GetRpcArg("feeSourceAddress"),
         },
         RPCResult{
@@ -637,11 +681,9 @@ static UniValue protx_register_common_wrapper(const JSONRPCRequest& request,
     const bool isEvoRequested = mnType == MnType::Evo;
 
     std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
-    if (!pwallet) return NullUniValue;
+    if (!pwallet) return UniValue::VNULL;
 
-    if (action == ProTxRegisterAction::External || action == ProTxRegisterAction::Fund) {
-        EnsureWalletIsUnlocked(*pwallet);
-    }
+    EnsureWalletIsUnlocked(*pwallet);
 
     size_t paramIdx = 0;
 
@@ -653,6 +695,9 @@ static UniValue protx_register_common_wrapper(const JSONRPCRequest& request,
 
     CProRegTx ptx;
     ptx.nType = mnType;
+    ptx.nVersion = ProTxVersion::GetMaxFromDeployment<CProRegTx>(WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip()),
+                                                                 chainman, /*is_basic_override=*/!use_legacy);
+    ptx.netInfo = NetInfoInterface::MakeNetInfo(ptx.nVersion);
 
     if (action == ProTxRegisterAction::Fund) {
         CTxDestination collateralDest = DecodeDestination(request.params[paramIdx].get_str());
@@ -677,22 +722,15 @@ static UniValue protx_register_common_wrapper(const JSONRPCRequest& request,
         paramIdx += 2;
     }
 
-    if (request.params[paramIdx].get_str() != "") {
-        if (auto addr = Lookup(request.params[paramIdx].get_str(), Params().GetDefaultPort(), false); addr.has_value()) {
-            ptx.addr = addr.value();
-        } else {
-            throw std::runtime_error(strprintf("invalid network address %s", request.params[paramIdx].get_str()));
-        }
-    }
+    ProcessNetInfoCore(ptx, request.params[paramIdx], /*optional=*/true);
 
     ptx.keyIDOwner = ParsePubKeyIDFromAddress(request.params[paramIdx + 1].get_str(), "owner address");
     ptx.pubKeyOperator.Set(ParseBLSPubKey(request.params[paramIdx + 2].get_str(), "operator BLS address", use_legacy), use_legacy);
-    ptx.nVersion = use_legacy ? CProRegTx::LEGACY_BLS_VERSION : CProRegTx::BASIC_BLS_VERSION;
-    CHECK_NONFATAL(ptx.pubKeyOperator.IsLegacy() == (ptx.nVersion == CProRegTx::LEGACY_BLS_VERSION));
+    CHECK_NONFATAL(ptx.pubKeyOperator.IsLegacy() == (ptx.nVersion == ProTxVersion::LegacyBLS));
 
     CKeyID keyIDVoting = ptx.keyIDOwner;
 
-    if (request.params[paramIdx + 3].get_str() != "") {
+    if (!request.params[paramIdx + 3].get_str().empty()) {
         keyIDVoting = ParsePubKeyIDFromAddress(request.params[paramIdx + 3].get_str(), "voting address");
     }
 
@@ -716,17 +754,7 @@ static UniValue protx_register_common_wrapper(const JSONRPCRequest& request,
         }
         ptx.platformNodeID.SetHex(request.params[paramIdx + 6].get_str());
 
-        int32_t requestedPlatformP2PPort = ParseInt32V(request.params[paramIdx + 7], "platformP2PPort");
-        if (!ValidatePlatformPort(requestedPlatformP2PPort)) {
-            throw JSONRPCError(RPC_INVALID_PARAMETER, "platformP2PPort must be a valid port [1-65535]");
-        }
-        ptx.platformP2PPort = static_cast<uint16_t>(requestedPlatformP2PPort);
-
-        int32_t requestedPlatformHTTPPort = ParseInt32V(request.params[paramIdx + 8], "platformHTTPPort");
-        if (!ValidatePlatformPort(requestedPlatformHTTPPort)) {
-            throw JSONRPCError(RPC_INVALID_PARAMETER, "platformHTTPPort must be a valid port [1-65535]");
-        }
-        ptx.platformHTTPPort = static_cast<uint16_t>(requestedPlatformHTTPPort);
+        ProcessNetInfoPlatform(ptx, request.params[paramIdx + 7], request.params[paramIdx + 8], /*optional=*/true);
 
         paramIdx += 3;
     }
@@ -771,7 +799,7 @@ static UniValue protx_register_common_wrapper(const JSONRPCRequest& request,
         // referencing external collateral
 
         const bool unlockOnError = [&]() {
-            if (LOCK(pwallet->cs_wallet); !pwallet->IsLockedCoin(ptx.collateralOutpoint.hash, ptx.collateralOutpoint.n)) {
+            if (LOCK(pwallet->cs_wallet); !pwallet->IsLockedCoin(ptx.collateralOutpoint)) {
                 pwallet->LockCoin(ptx.collateralOutpoint);
                 return true;
             }
@@ -855,8 +883,8 @@ static RPCHelpMan protx_register_submit()
 
     CChainstateHelper& chain_helper = *CHECK_NONFATAL(node.chain_helper);
 
-    std::shared_ptr<CWallet> const wallet = GetWalletForJSONRPCRequest(request);
-    if (!wallet) return NullUniValue;
+    const std::shared_ptr<const CWallet> wallet = GetWalletForJSONRPCRequest(request);
+    if (!wallet) return UniValue::VNULL;
 
     EnsureWalletIsUnlocked(*wallet);
 
@@ -884,7 +912,7 @@ static RPCHelpMan protx_register_submit()
     ptx.vchSig = opt_vchSig.value();
 
     SetTxPayload(tx, ptx);
-    return SignAndSendSpecialTx(request, chain_helper, chainman, tx);
+    return SignAndSendSpecialTx(request, chain_helper, chainman, tx, /*fSubmit=*/true);
 },
     };
 }
@@ -898,13 +926,17 @@ static RPCHelpMan protx_update_service()
         + HELP_REQUIRING_PASSPHRASE,
         {
             GetRpcArg("proTxHash"),
-            GetRpcArg("ipAndPort_update"),
+            GetRpcArg("coreP2PAddrs_update"),
             GetRpcArg("operatorKey"),
             GetRpcArg("operatorPayoutAddress"),
             GetRpcArg("feeSourceAddress"),
+            GetRpcArg("submit"),
         },
-        RPCResult{
-            RPCResult::Type::STR_HEX, "txid", "The transaction id"
+        {
+            RPCResult{"if \"submit\" is not set or set to true",
+                RPCResult::Type::STR_HEX, "txid", "The transaction id"},
+            RPCResult{"if \"submit\" is set to false",
+                RPCResult::Type::STR_HEX, "hex", "The serialized signed ProTx in hex format"},
         },
         RPCExamples{
             HelpExampleCli("protx", "update_service \"0123456701234567012345670123456701234567012345670123456701234567\" \"1.2.3.4:1234\" 5a2e15982e62f1e0b7cf9783c64cf7e3af3f90a52d6c40f6f95d624c0b1621cd")
@@ -927,16 +959,21 @@ static RPCHelpMan protx_update_service_evo()
             HELP_REQUIRING_PASSPHRASE,
         {
             GetRpcArg("proTxHash"),
-            GetRpcArg("ipAndPort_update"),
+            GetRpcArg("coreP2PAddrs_update"),
             GetRpcArg("operatorKey"),
             GetRpcArg("platformNodeID"),
-            GetRpcArg("platformP2PPort"),
-            GetRpcArg("platformHTTPPort"),
+            GetRpcArg("platformP2PAddrs_update"),
+            GetRpcArg("platformHTTPSAddrs_update"),
             GetRpcArg("operatorPayoutAddress"),
             GetRpcArg("feeSourceAddress"),
+            GetRpcArg("submit"),
         },
-        RPCResult{
-            RPCResult::Type::STR_HEX, "txid", "The transaction id"},
+        {
+            RPCResult{"if \"submit\" is not set or set to true",
+                RPCResult::Type::STR_HEX, "txid", "The transaction id"},
+            RPCResult{"if \"submit\" is set to false",
+                RPCResult::Type::STR_HEX, "hex", "The serialized signed ProTx in hex format"},
+        },
         RPCExamples{
             HelpExampleCli("protx", "update_service_evo \"0123456701234567012345670123456701234567012345670123456701234567\" \"1.2.3.4:1234\" \"5a2e15982e62f1e0b7cf9783c64cf7e3af3f90a52d6c40f6f95d624c0b1621cd\" \"f2dbd9b0a1f541a7c44d34a58674d0262f5feca5\" 22821 22822")},
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
@@ -956,19 +993,35 @@ static UniValue protx_update_service_common_wrapper(const JSONRPCRequest& reques
 
     const bool isEvoRequested = mnType == MnType::Evo;
     std::shared_ptr<CWallet> const wallet = GetWalletForJSONRPCRequest(request);
-    if (!wallet) return NullUniValue;
+    if (!wallet) return UniValue::VNULL;
 
     EnsureWalletIsUnlocked(*wallet);
 
     CProUpServTx ptx;
-    ptx.nType = mnType;
     ptx.proTxHash = ParseHashV(request.params[0], "proTxHash");
-
-    if (auto addr = Lookup(request.params[1].get_str().c_str(), Params().GetDefaultPort(), false); addr.has_value()) {
-        ptx.addr = addr.value();
-    } else {
-        throw std::runtime_error(strprintf("invalid network address %s", request.params[1].get_str()));
+    auto dmn = dmnman.GetListAtChainTip().GetMN(ptx.proTxHash);
+    if (!dmn) {
+        throw std::runtime_error(strprintf("masternode with proTxHash %s not found", ptx.proTxHash.ToString()));
     }
+
+    ptx.nType = mnType;
+    if (dmn->nType != mnType) {
+        throw std::runtime_error(strprintf("masternode with proTxHash %s is not a %s", ptx.proTxHash.ToString(), GetMnType(mnType).description));
+    }
+
+    ptx.nVersion = ProTxVersion::GetMaxFromDeployment<CProUpServTx>(WITH_LOCK(::cs_main,
+                                                                              return chainman.ActiveChain().Tip()),
+                                                                    chainman);
+
+    // Legacy masternodes must upgrade to BasicBLS before using higher versions.
+    // Clamp to BasicBLS to avoid "bad-protx-version-upgrade" validation failure.
+    if (dmn->pdmnState->nVersion == ProTxVersion::LegacyBLS && ptx.nVersion > ProTxVersion::BasicBLS) {
+        ptx.nVersion = ProTxVersion::BasicBLS;
+    }
+
+    ptx.netInfo = NetInfoInterface::MakeNetInfo(ptx.nVersion);
+
+    ProcessNetInfoCore(ptx, request.params[1], /*optional=*/false);
 
     CBLSSecretKey keyOperator = ParseBLSSecretKey(request.params[2].get_str(), "operatorKey");
 
@@ -979,29 +1032,10 @@ static UniValue protx_update_service_common_wrapper(const JSONRPCRequest& reques
         }
         ptx.platformNodeID.SetHex(request.params[paramIdx].get_str());
 
-        int32_t requestedPlatformP2PPort = ParseInt32V(request.params[paramIdx + 1], "platformP2PPort");
-        if (!ValidatePlatformPort(requestedPlatformP2PPort)) {
-            throw JSONRPCError(RPC_INVALID_PARAMETER, "platformP2PPort must be a valid port [1-65535]");
-        }
-        ptx.platformP2PPort = static_cast<uint16_t>(requestedPlatformP2PPort);
-
-        int32_t requestedPlatformHTTPPort = ParseInt32V(request.params[paramIdx + 2], "platformHTTPPort");
-        if (!ValidatePlatformPort(requestedPlatformHTTPPort)) {
-            throw JSONRPCError(RPC_INVALID_PARAMETER, "platformHTTPPort must be a valid port [1-65535]");
-        }
-        ptx.platformHTTPPort = static_cast<uint16_t>(requestedPlatformHTTPPort);
+        ProcessNetInfoPlatform(ptx, request.params[paramIdx + 1], request.params[paramIdx + 2], /*optional=*/false);
 
         paramIdx += 3;
     }
-
-    auto dmn = dmnman.GetListAtChainTip().GetMN(ptx.proTxHash);
-    if (!dmn) {
-        throw std::runtime_error(strprintf("masternode with proTxHash %s not found", ptx.proTxHash.ToString()));
-    }
-    if (dmn->nType != mnType) {
-        throw std::runtime_error(strprintf("masternode with proTxHash %s is not a %s", ptx.proTxHash.ToString(), GetMnType(mnType).description));
-    }
-    ptx.nVersion = dmn->pdmnState->nVersion;
 
     if (keyOperator.GetPublicKey() != dmn->pdmnState->pubKeyOperator.Get()) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("the operator key does not belong to the registered public key"));
@@ -1043,14 +1077,17 @@ static UniValue protx_update_service_common_wrapper(const JSONRPCRequest& reques
         }
     }
 
+    bool fSubmit{true};
+    if (!request.params[paramIdx + 2].isNull()) {
+        fSubmit = ParseBoolV(request.params[paramIdx + 2], "submit");
+    }
+
     FundSpecialTx(*wallet, tx, ptx, feeSource);
 
-    const bool isV19active = DeploymentActiveAfter(WITH_LOCK(cs_main, return chainman.ActiveChain().Tip();),
-                                                   Params().GetConsensus(), Consensus::DEPLOYMENT_V19);
-    SignSpecialTxPayloadByHash(tx, ptx, keyOperator, !isV19active);
+    SignSpecialTxPayloadByHash(tx, ptx, keyOperator, /*use_legacy=*/ptx.nVersion == ProTxVersion::LegacyBLS);
     SetTxPayload(tx, ptx);
 
-    return SignAndSendSpecialTx(request, chain_helper, chainman, tx);
+    return SignAndSendSpecialTx(request, chain_helper, chainman, tx, fSubmit);
 }
 
 static RPCHelpMan protx_update_registrar_wrapper(const bool specific_legacy_bls_scheme)
@@ -1063,6 +1100,7 @@ static RPCHelpMan protx_update_registrar_wrapper(const bool specific_legacy_bls_
         "\nCreates and sends a ProUpRegTx to the network. This will update the operator key, voting key and payout\n"
         "address of the masternode specified by \"proTxHash\".\n"
         "The owner key of the masternode must be known to your wallet.\n"
+        + std::string(specific_legacy_bls_scheme ? "\nDEPRECATED: May be removed in a future version, pass config option -deprecatedrpc=legacy_mn to use RPC\n" : "")
         + HELP_REQUIRING_PASSPHRASE,
         {
             GetRpcArg("proTxHash"),
@@ -1070,9 +1108,13 @@ static RPCHelpMan protx_update_registrar_wrapper(const bool specific_legacy_bls_
             GetRpcArg("votingAddress_update"),
             GetRpcArg("payoutAddress_update"),
             GetRpcArg("feeSourceAddress"),
+            GetRpcArg("submit"),
         },
-        RPCResult{
-            RPCResult::Type::STR_HEX, "txid", "The transaction id"
+        {
+            RPCResult{"if \"submit\" is not set or set to true",
+                RPCResult::Type::STR_HEX, "txid", "The transaction id"},
+            RPCResult{"if \"submit\" is set to false",
+                RPCResult::Type::STR_HEX, "hex", "The serialized signed ProTx in hex format"},
         },
         RPCExamples{
             HelpExampleCli("protx", rpc_example)
@@ -1080,6 +1122,10 @@ static RPCHelpMan protx_update_registrar_wrapper(const bool specific_legacy_bls_
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
     const bool use_legacy{self.m_name == "protx update_registrar_legacy"};
+    if (use_legacy && !IsDeprecatedRPCEnabled("legacy_mn")) {
+        throw std::runtime_error("DEPRECATED: Pass config option -deprecatedrpc=legacy_mn to enable this RPC");
+    }
+
     const NodeContext& node = EnsureAnyNodeContext(request.context);
     const ChainstateManager& chainman = EnsureChainman(node);
 
@@ -1087,21 +1133,24 @@ static RPCHelpMan protx_update_registrar_wrapper(const bool specific_legacy_bls_
     CChainstateHelper& chain_helper = *CHECK_NONFATAL(node.chain_helper);
 
     std::shared_ptr<CWallet> const wallet = GetWalletForJSONRPCRequest(request);
-    if (!wallet) return NullUniValue;
+    if (!wallet) return UniValue::VNULL;
 
     EnsureWalletIsUnlocked(*wallet);
 
     CProUpRegTx ptx;
-    ptx.proTxHash = ParseHashV(request.params[0], "proTxHash");
+    ptx.nVersion = ProTxVersion::GetMaxFromDeployment<CProUpRegTx>(WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip()),
+                                                                   chainman, /*is_basic_override=*/!use_legacy);
 
+    ptx.proTxHash = ParseHashV(request.params[0], "proTxHash");
     auto dmn = dmnman.GetListAtChainTip().GetMN(ptx.proTxHash);
     if (!dmn) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("masternode %s not found", ptx.proTxHash.ToString()));
     }
+
     ptx.keyIDVoting = dmn->pdmnState->keyIDVoting;
     ptx.scriptPayout = dmn->pdmnState->scriptPayout;
 
-    if (request.params[1].get_str() != "") {
+    if (!request.params[1].get_str().empty()) {
         // new pubkey
         ptx.pubKeyOperator.Set(ParseBLSPubKey(request.params[1].get_str(), "operator BLS address", use_legacy), use_legacy);
     } else {
@@ -1109,16 +1158,15 @@ static RPCHelpMan protx_update_registrar_wrapper(const bool specific_legacy_bls_
         ptx.pubKeyOperator = dmn->pdmnState->pubKeyOperator;
     }
 
-    ptx.nVersion = use_legacy ? CProUpRegTx::LEGACY_BLS_VERSION : CProUpRegTx::BASIC_BLS_VERSION;
-    CHECK_NONFATAL(ptx.pubKeyOperator.IsLegacy() == (ptx.nVersion == CProUpRegTx::LEGACY_BLS_VERSION));
+    CHECK_NONFATAL(ptx.pubKeyOperator.IsLegacy() == (ptx.nVersion == ProTxVersion::LegacyBLS));
 
-    if (request.params[2].get_str() != "") {
+    if (!request.params[2].get_str().empty()) {
         ptx.keyIDVoting = ParsePubKeyIDFromAddress(request.params[2].get_str(), "voting address");
     }
 
     CTxDestination payoutDest;
     ExtractDestination(ptx.scriptPayout, payoutDest);
-    if (request.params[3].get_str() != "") {
+    if (!request.params[3].get_str().empty()) {
         payoutDest = DecodeDestination(request.params[3].get_str());
         if (!IsValidDestination(payoutDest)) {
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf("invalid payout address: %s", request.params[3].get_str()));
@@ -1148,11 +1196,16 @@ static RPCHelpMan protx_update_registrar_wrapper(const bool specific_legacy_bls_
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, std::string("Invalid Dash address: ") + request.params[4].get_str());
     }
 
+    bool fSubmit{true};
+    if (!request.params[5].isNull()) {
+        fSubmit = ParseBoolV(request.params[5], "submit");
+    }
+
     FundSpecialTx(*wallet, tx, ptx, feeSourceDest);
     SignSpecialTxPayloadByHash(tx, ptx, dmn->pdmnState->keyIDOwner, *wallet);
     SetTxPayload(tx, ptx);
 
-    return SignAndSendSpecialTx(request, chain_helper, chainman, tx);
+    return SignAndSendSpecialTx(request, chain_helper, chainman, tx, fSubmit);
 },
     };
 }
@@ -1180,9 +1233,13 @@ static RPCHelpMan protx_revoke()
             GetRpcArg("operatorKey"),
             GetRpcArg("reason"),
             GetRpcArg("feeSourceAddress"),
+            GetRpcArg("submit"),
         },
-        RPCResult{
-            RPCResult::Type::STR_HEX, "txid", "The transaction id"
+        {
+            RPCResult{"if \"submit\" is not set or set to true",
+                RPCResult::Type::STR_HEX, "txid", "The transaction id"},
+            RPCResult{"if \"submit\" is set to false",
+                RPCResult::Type::STR_HEX, "hex", "The serialized signed ProTx in hex format"},
         },
         RPCExamples{
             HelpExampleCli("protx", "revoke \"0123456701234567012345670123456701234567012345670123456701234567\" \"072f36a77261cdd5d64c32d97bac417540eddca1d5612f416feb07ff75a8e240\"")
@@ -1196,14 +1253,26 @@ static RPCHelpMan protx_revoke()
     CChainstateHelper& chain_helper = *CHECK_NONFATAL(node.chain_helper);
 
     std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
-    if (!pwallet) return NullUniValue;
+    if (!pwallet) return UniValue::VNULL;
 
     EnsureWalletIsUnlocked(*pwallet);
 
-    const bool isV19active{DeploymentActiveAfter(WITH_LOCK(cs_main, return chainman.ActiveChain().Tip();), Params().GetConsensus(), Consensus::DEPLOYMENT_V19)};
     CProUpRevTx ptx;
-    ptx.nVersion = CProUpRevTx::GetVersion(isV19active);
     ptx.proTxHash = ParseHashV(request.params[0], "proTxHash");
+
+    auto dmn = dmnman.GetListAtChainTip().GetMN(ptx.proTxHash);
+    if (!dmn) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("masternode %s not found", ptx.proTxHash.ToString()));
+    }
+
+    ptx.nVersion = ProTxVersion::GetMaxFromDeployment<CProUpRevTx>(WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip()),
+                                                                   chainman);
+
+    // Legacy masternodes must upgrade to BasicBLS before using higher versions.
+    // Clamp to BasicBLS to avoid "bad-protx-version-upgrade" validation failure.
+    if (dmn->pdmnState->nVersion == ProTxVersion::LegacyBLS && ptx.nVersion > ProTxVersion::BasicBLS) {
+        ptx.nVersion = ProTxVersion::BasicBLS;
+    }
 
     CBLSSecretKey keyOperator = ParseBLSSecretKey(request.params[1].get_str(), "operatorKey");
 
@@ -1213,11 +1282,6 @@ static RPCHelpMan protx_revoke()
             throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("invalid reason %d, must be between 0 and %d", nReason, CProUpRevTx::REASON_LAST));
         }
         ptx.nReason = (uint16_t)nReason;
-    }
-
-    auto dmn = dmnman.GetListAtChainTip().GetMN(ptx.proTxHash);
-    if (!dmn) {
-        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("masternode %s not found", ptx.proTxHash.ToString()));
     }
 
     if (keyOperator.GetPublicKey() != dmn->pdmnState->pubKeyOperator.Get()) {
@@ -1247,10 +1311,15 @@ static RPCHelpMan protx_revoke()
         throw JSONRPCError(RPC_INTERNAL_ERROR, "No payout or fee source addresses found, can't revoke");
     }
 
-    SignSpecialTxPayloadByHash(tx, ptx, keyOperator, !isV19active);
+    bool fSubmit{true};
+    if (!request.params[4].isNull()) {
+        fSubmit = ParseBoolV(request.params[4], "submit");
+    }
+
+    SignSpecialTxPayloadByHash(tx, ptx, keyOperator, /*use_legacy=*/ptx.nVersion == ProTxVersion::LegacyBLS);
     SetTxPayload(tx, ptx);
 
-    return SignAndSendSpecialTx(request, chain_helper, chainman, tx);
+    return SignAndSendSpecialTx(request, chain_helper, chainman, tx, fSubmit);
 },
     };
 }
@@ -1283,11 +1352,11 @@ static UniValue BuildDMNListEntry(const CWallet* const pwallet, const CDetermini
 
     if (pindex != nullptr) {
         if (confirmations > -1) {
-            confirmations -= WITH_LOCK(cs_main, return chainman.ActiveChain().Height()) - pindex->nHeight;
+            confirmations -= WITH_LOCK(::cs_main, return chainman.ActiveChain().Height()) - pindex->nHeight;
         } else {
             uint256 minedBlockHash;
             collateralTx = GetTransaction(/* pindex */ nullptr, /* mempool */ nullptr, dmn.collateralOutpoint.hash, Params().GetConsensus(), minedBlockHash);
-            const CBlockIndex* const pindexMined = WITH_LOCK(cs_main, return chainman.m_blockman.LookupBlockIndex(minedBlockHash));
+            const CBlockIndex* const pindexMined = WITH_LOCK(::cs_main, return chainman.m_blockman.LookupBlockIndex(minedBlockHash));
             CHECK_NONFATAL(pindexMined != nullptr);
             CHECK_NONFATAL(pindex->GetAncestor(pindexMined->nHeight) == pindexMined);
             confirmations = pindex->nHeight - pindexMined->nHeight + 1;
@@ -1318,8 +1387,7 @@ static UniValue BuildDMNListEntry(const CWallet* const pwallet, const CDetermini
     }
 #endif
 
-    const auto metaInfo = mn_metaman.GetMetaInfo(dmn.proTxHash);
-    o.pushKV("metaInfo", metaInfo->ToJson());
+    o.pushKV("metaInfo", mn_metaman.GetInfo(dmn.proTxHash).ToJson());
 
     return o;
 }
@@ -1343,7 +1411,16 @@ static RPCHelpMan protx_list()
             {"detailed", RPCArg::Type::BOOL, RPCArg::Default{false}, "If not specified, only the hashes of the ProTx will be returned."},
             {"height", RPCArg::Type::NUM, RPCArg::DefaultHint{"current chain-tip"}, ""},
         },
-        RPCResults{},
+        RPCResult{
+            RPCResult::Type::ARR, "", "List of masternodes",
+            {
+                RPCResult{"when detailed=false", RPCResult::Type::STR, "", "ProTx hash"},
+                RPCResult{"when detailed=true", RPCResult::Type::OBJ, "", "",
+                    {
+                        // TODO: document fields of the detailed entry
+                        {RPCResult::Type::ELISION, "", ""}
+                    }},
+            }},
         RPCExamples{""},
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
@@ -1384,7 +1461,7 @@ static RPCHelpMan protx_list()
 
         bool detailed = !request.params[1].isNull() ? ParseBoolV(request.params[1], "detailed") : false;
 
-        LOCK2(wallet->cs_wallet, cs_main);
+        LOCK2(wallet->cs_wallet, ::cs_main);
         int height = !request.params[2].isNull() ? ParseInt32V(request.params[2], "height") : chainman.ActiveChain().Height();
         if (height < 1 || height > chainman.ActiveChain().Height()) {
             throw JSONRPCError(RPC_INVALID_PARAMETER, "invalid height specified");
@@ -1396,7 +1473,7 @@ static RPCHelpMan protx_list()
         }
 
         CDeterministicMNList mnList = dmnman.GetListForBlock(chainman.ActiveChain()[height]);
-        mnList.ForEachMN(false, [&](const auto& dmn) {
+        mnList.ForEachMN(/*onlyValid=*/false, [&](const auto& dmn) {
             if (setOutpts.count(dmn.collateralOutpoint) ||
                 CheckWalletOwnsKey(wallet.get(), dmn.pdmnState->keyIDOwner) ||
                 CheckWalletOwnsKey(wallet.get(), dmn.pdmnState->keyIDVoting) ||
@@ -1414,9 +1491,9 @@ static RPCHelpMan protx_list()
         bool detailed = !request.params[1].isNull() ? ParseBoolV(request.params[1], "detailed") : false;
 
 #ifdef ENABLE_WALLET
-        LOCK2(wallet ? wallet->cs_wallet : cs_main, cs_main);
+        LOCK2(wallet ? wallet->cs_wallet : ::cs_main, ::cs_main);
 #else
-        LOCK(cs_main);
+        LOCK(::cs_main);
 #endif
         int height = !request.params[2].isNull() ? ParseInt32V(request.params[2], "height") : chainman.ActiveChain().Height();
         if (height < 1 || height > chainman.ActiveChain().Height()) {
@@ -1450,6 +1527,7 @@ static RPCHelpMan protx_info()
         RPCResult{
             RPCResult::Type::OBJ, "", "Details about a specific deterministic masternode",
             {
+                // TODO: implement proper doc for protx info
                 {RPCResult::Type::ELISION, "", ""}
             }
         },
@@ -1481,10 +1559,10 @@ static RPCHelpMan protx_info()
     uint256 proTxHash(ParseHashV(request.params[0], "proTxHash"));
 
     if (request.params[1].isNull()) {
-        LOCK(cs_main);
+        LOCK(::cs_main);
         pindex = chainman.ActiveChain().Tip();
     } else {
-        LOCK(cs_main);
+        LOCK(::cs_main);
         uint256 blockHash(ParseHashV(request.params[1], "blockHash"));
         pindex = chainman.m_blockman.LookupBlockIndex(blockHash);
         if (pindex == nullptr) {
@@ -1502,9 +1580,9 @@ static RPCHelpMan protx_info()
     };
 }
 
-static uint256 ParseBlock(const UniValue& v, const ChainstateManager& chainman, const std::string& strName) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+static uint256 ParseBlock(const UniValue& v, const ChainstateManager& chainman, const std::string& strName) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
 {
-    AssertLockHeld(cs_main);
+    AssertLockHeld(::cs_main);
 
     try {
         return ParseHashV(v, strName);
@@ -1525,7 +1603,7 @@ static RPCHelpMan protx_diff()
             {"block", RPCArg::Type::NUM, RPCArg::Optional::NO, "The ending block height."},
             {"extended", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "Show additional fields."},
         },
-        RPCResults{},
+        CSimplifiedMNListDiff::GetJsonHelp(/*key=*/"", /*optional=*/false),
         RPCExamples{""},
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
@@ -1535,7 +1613,7 @@ static RPCHelpMan protx_diff()
     CDeterministicMNManager& dmnman = *CHECK_NONFATAL(node.dmnman);
     const LLMQContext& llmq_ctx = *CHECK_NONFATAL(node.llmq_ctx);
 
-    LOCK(cs_main);
+    LOCK(::cs_main);
     uint256 baseBlockHash = ParseBlock(request.params[0], chainman, "baseBlock");
     uint256 blockHash = ParseBlock(request.params[1], chainman, "block");
     bool extended = false;
@@ -1557,9 +1635,9 @@ static RPCHelpMan protx_diff()
     };
 }
 
-static const CBlockIndex* ParseBlockIndex(const UniValue& v, const ChainstateManager& chainman, const std::string& strName) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+static const CBlockIndex* ParseBlockIndex(const UniValue& v, const ChainstateManager& chainman, const std::string& strName) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
 {
-    AssertLockHeld(cs_main);
+    AssertLockHeld(::cs_main);
 
     try {
         uint256 hash = ParseHashV(v, strName);
@@ -1583,8 +1661,21 @@ static RPCHelpMan protx_listdiff()
                        {"baseBlock", RPCArg::Type::NUM, RPCArg::Optional::NO, "The starting block height."},
                        {"block", RPCArg::Type::NUM, RPCArg::Optional::NO, "The ending block height."},
                },
-               RPCResults{},
-               RPCExamples{""},
+                RPCResult {
+                    RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::NUM, "baseHeight", "Height of base (starting) block"},
+                        {RPCResult::Type::NUM, "blockHeight", "Height of target (ending) block"},
+                        {RPCResult::Type::ARR, "addedMNs", "Added masternodes",
+                            {CDeterministicMN::GetJsonHelp(/*key=*/"", /*optional=*/false)}},
+                        {RPCResult::Type::ARR, "removedMns", "Removed masternodes",
+                            {{RPCResult::Type::STR_HEX, "protx", "ProTx of removed masternode"}}},
+                        {RPCResult::Type::ARR, "updatedMNs", "Updated masternodes",
+                            {{RPCResult::Type::OBJ, "<protx_hash>", "",
+                                {CDeterministicMNStateDiff::GetJsonHelp(/*key=*/"", /*optional=*/false)}}}},
+                    },
+                },
+                RPCExamples{""},
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
     const NodeContext& node = EnsureAnyNodeContext(request.context);
@@ -1592,7 +1683,7 @@ static RPCHelpMan protx_listdiff()
 
     CDeterministicMNManager& dmnman = *CHECK_NONFATAL(node.dmnman);
 
-    LOCK(cs_main);
+    LOCK(::cs_main);
     UniValue ret(UniValue::VOBJ);
 
     const CBlockIndex* pBaseBlockIndex = ParseBlockIndex(request.params[0], chainman, "baseBlock");
@@ -1647,6 +1738,175 @@ static RPCHelpMan protx_listdiff()
     };
 }
 
+// Helper function for evodb verify/repair commands
+static UniValue evodb_verify_or_repair_impl(const JSONRPCRequest& request, bool repair)
+{
+    const NodeContext& node = EnsureAnyNodeContext(request.context);
+    ChainstateManager& chainman = EnsureChainman(node);
+    CDeterministicMNManager& dmnman = *CHECK_NONFATAL(node.dmnman);
+    CChainstateHelper& chain_helper = *CHECK_NONFATAL(node.chain_helper);
+
+    const CBlockIndex* start_index;
+    const CBlockIndex* stop_index;
+
+    {
+        LOCK(::cs_main);
+        // Default to DIP0003 activation height if startBlock not specified
+        if (request.params[0].isNull()) {
+            const auto& consensus_params = Params().GetConsensus();
+            start_index = chainman.ActiveChain()[consensus_params.DIP0003Height];
+            if (!start_index) {
+                throw JSONRPCError(RPC_INTERNAL_ERROR, "Cannot find DIP0003 activation block");
+            }
+        } else {
+            uint256 start_block_hash = ParseBlock(request.params[0], chainman, "startBlock");
+            start_index = chainman.m_blockman.LookupBlockIndex(start_block_hash);
+            if (!start_index) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Start block not found");
+            }
+        }
+
+        // Default to chain tip if stopBlock not specified
+        if (request.params[1].isNull()) {
+            stop_index = chainman.ActiveChain().Tip();
+            if (!stop_index) {
+                throw JSONRPCError(RPC_INTERNAL_ERROR, "Cannot find chain tip");
+            }
+        } else {
+            uint256 stop_block_hash = ParseBlock(request.params[1], chainman, "stopBlock");
+            stop_index = chainman.m_blockman.LookupBlockIndex(stop_block_hash);
+            if (!stop_index) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Stop block not found");
+            }
+        }
+    }
+
+    int start_height = start_index->nHeight;
+    int stop_height = stop_index->nHeight;
+
+    // Validation
+    if (stop_height < start_height) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "stopBlock must be >= startBlock");
+    }
+
+    // Create a callback that wraps CSpecialTxProcessor::RebuildListFromBlock
+    auto build_list_func = [&chain_helper](const CBlock& block, const CBlockIndex* const pindexPrev,
+                                           const CDeterministicMNList& prevList, const CCoinsViewCache& view,
+                                           bool debugLogs, BlockValidationState& state,
+                                           CDeterministicMNList& mnListRet) -> bool {
+        return chain_helper.special_tx->RebuildListFromBlock(block, pindexPrev, prevList, view, debugLogs, state, mnListRet);
+    };
+
+    // Call the dmnman method to do the work
+    auto recalc_result = dmnman.RecalculateAndRepairDiffs(start_index, stop_index, chainman, build_list_func, repair);
+
+    // Convert result to UniValue
+    UniValue result(UniValue::VOBJ);
+    UniValue verification_errors(UniValue::VARR);
+
+    for (const auto& error : recalc_result.verification_errors) {
+        verification_errors.push_back(error);
+    }
+
+    result.pushKV("startHeight", recalc_result.start_height);
+    result.pushKV("stopHeight", recalc_result.stop_height);
+    result.pushKV("diffsRecalculated", recalc_result.diffs_recalculated);
+    result.pushKV("snapshotsVerified", recalc_result.snapshots_verified);
+    result.pushKV("verificationErrors", verification_errors);
+
+    // Only include repair errors if we're in repair mode
+    if (repair) {
+        UniValue repair_errors(UniValue::VARR);
+        for (const auto& error : recalc_result.repair_errors) {
+            repair_errors.push_back(error);
+        }
+        result.pushKV("repairErrors", repair_errors);
+    }
+
+    return result;
+}
+
+static RPCHelpMan evodb_verify()
+{
+    return RPCHelpMan{"evodb verify",
+        "\nVerifies evodb diff records between specified block heights.\n"
+        "Checks that all diffs applied between snapshots in the range match the saved snapshots in evodb.\n"
+        "This is a read-only operation that does not modify the database.\n"
+        "If no heights are specified, defaults to the full range from DIP0003 activation to chain tip.\n",
+        {
+            {"startBlock", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "The starting block height (defaults to DIP0003 activation height)."},
+            {"stopBlock", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "The ending block height (defaults to current chain tip)."},
+        },
+        RPCResult{
+            RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::NUM, "startHeight", "Actual starting block height (may differ from input if clamped to DIP0003 activation)"},
+                {RPCResult::Type::NUM, "stopHeight", "Ending block height"},
+                {RPCResult::Type::NUM, "diffsRecalculated", "Number of diffs recalculated (always 0 for verify-only mode)"},
+                {RPCResult::Type::NUM, "snapshotsVerified", "Number of snapshot pairs that passed verification"},
+                {RPCResult::Type::ARR, "verificationErrors", "List of verification errors (empty if verification passed)",
+                    {
+                        {RPCResult::Type::STR, "", "Error message"},
+                    }
+                },
+            }
+        },
+        RPCExamples{
+            HelpExampleCli("evodb verify", "")
+            + HelpExampleCli("evodb verify", "1000 2000")
+            + HelpExampleRpc("evodb", "\"verify\"")
+            + HelpExampleRpc("evodb", "\"verify\", 1000, 2000")
+        },
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    return evodb_verify_or_repair_impl(request, false);
+},
+    };
+}
+
+static RPCHelpMan evodb_repair()
+{
+    return RPCHelpMan{"evodb repair",
+        "\nRepairs corrupted evodb diff records between specified block heights.\n"
+        "First verifies all diffs applied between snapshots in the range.\n"
+        "If verification fails, recalculates diffs from blockchain data and replaces corrupted records.\n"
+        "If no heights are specified, defaults to the full range from DIP0003 activation to chain tip.\n",
+        {
+            {"startBlock", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "The starting block height (defaults to DIP0003 activation height)."},
+            {"stopBlock", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "The ending block height (defaults to current chain tip)."},
+        },
+        RPCResult{
+            RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::NUM, "startHeight", "Actual starting block height (may differ from input if clamped to DIP0003 activation)"},
+                {RPCResult::Type::NUM, "stopHeight", "Ending block height"},
+                {RPCResult::Type::NUM, "diffsRecalculated", "Number of diffs successfully recalculated and written to database"},
+                {RPCResult::Type::NUM, "snapshotsVerified", "Number of snapshot pairs that passed verification"},
+                {RPCResult::Type::ARR, "verificationErrors", "Errors encountered during verification phase (empty if verification passed)",
+                    {
+                        {RPCResult::Type::STR, "", "Error message"},
+                    }
+                },
+                {RPCResult::Type::ARR, "repairErrors", "Critical errors encountered during repair phase (non-empty means full reindex required)",
+                    {
+                        {RPCResult::Type::STR, "", "Error message"},
+                    }
+                },
+            }
+        },
+        RPCExamples{
+            HelpExampleCli("evodb repair", "")
+            + HelpExampleCli("evodb repair", "1000 2000")
+            + HelpExampleRpc("evodb", "\"repair\"")
+            + HelpExampleRpc("evodb", "\"repair\", 1000, 2000")
+        },
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    return evodb_verify_or_repair_impl(request, true);
+},
+    };
+}
+
 static RPCHelpMan protx_help()
 {
     return RPCHelpMan{
@@ -1661,9 +1921,9 @@ static RPCHelpMan protx_help()
         "  register_evo             - Create and send ProTx to network for an EvoNode\n"
         "  register_fund_evo        - Fund, create and send ProTx to network for an EvoNode\n"
         "  register_prepare_evo     - Create an unsigned ProTx for an EvoNode\n"
-        "  register_legacy          - Create a ProTx by parsing BLS using the legacy scheme and send it to network\n"
-        "  register_fund_legacy     - Fund and create a ProTx by parsing BLS using the legacy scheme, then send it to network\n"
-        "  register_prepare_legacy  - Create an unsigned ProTx by parsing BLS using the legacy scheme\n"
+        "  register_legacy          - (DEPRECATED) Create a ProTx by parsing BLS using the legacy scheme and send it to network\n"
+        "  register_fund_legacy     - (DEPRECATED) Fund and create a ProTx by parsing BLS using the legacy scheme, then send it to network\n"
+        "  register_prepare_legacy  - (DEPRECATED) Create an unsigned ProTx by parsing BLS using the legacy scheme\n"
         "  register_submit          - Sign and submit a ProTx\n"
 #endif
         "  list                     - List ProTxs\n"
@@ -1672,7 +1932,7 @@ static RPCHelpMan protx_help()
         "  update_service           - Create and send ProUpServTx to network\n"
         "  update_service_evo       - Create and send ProUpServTx to network for an EvoNode\n"
         "  update_registrar         - Create and send ProUpRegTx to network\n"
-        "  update_registrar_legacy  - Create ProUpRegTx by parsing BLS using the legacy scheme, then send it to network\n"
+        "  update_registrar_legacy  - (DEPRECATED) Create ProUpRegTx by parsing BLS using the legacy scheme, then send it to network\n"
         "  revoke                   - Create and send ProUpRevTx to network\n"
 #endif
         "  diff                     - Calculate a diff and a proof between two masternode lists\n"
@@ -1680,7 +1940,7 @@ static RPCHelpMan protx_help()
         {
             {"command", RPCArg::Type::STR, RPCArg::Optional::NO, "The command to execute"},
         },
-        RPCResults{},
+        RPCResult{RPCResult::Type::NONE, "", ""},
         RPCExamples{""},
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
@@ -1695,7 +1955,7 @@ static RPCHelpMan bls_generate()
         "bls generate",
         "\nReturns a BLS secret/public key pair.\n",
         {
-            {"legacy", RPCArg::Type::BOOL, RPCArg::Default{false}, "Set it true if need in legacy BLS scheme"},
+            {"legacy", RPCArg::Type::BOOL, RPCArg::Default{false}, "(DEPRECATED, can be set if -deprecatedrpc=legacy_mn is passed) Set true to use legacy BLS scheme"},
         },
         RPCResult{RPCResult::Type::OBJ,
                   "",
@@ -1709,6 +1969,9 @@ static RPCHelpMan bls_generate()
             sk.MakeNewKey();
             bool bls_legacy_scheme{false};
             if (!request.params[0].isNull()) {
+                if (!IsDeprecatedRPCEnabled("legacy_mn")) {
+                    throw std::runtime_error("DEPRECATED: Pass config option -deprecatedrpc=legacy_mn to set this argument");
+                }
                 bls_legacy_scheme = ParseBoolV(request.params[0], "bls_legacy_scheme");
             }
             UniValue ret(UniValue::VOBJ);
@@ -1767,7 +2030,7 @@ static RPCHelpMan bls_help()
         {
             {"command", RPCArg::Type::STR, RPCArg::Optional::NO, "The command to execute"},
         },
-        RPCResults{},
+        RPCResult{RPCResult::Type::NONE, "", ""},
         RPCExamples{""},
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
@@ -1776,40 +2039,64 @@ static RPCHelpMan bls_help()
     };
 }
 
-void RegisterEvoRPCCommands(CRPCTable &tableRPC)
-{
-// clang-format off
-static const CRPCCommand commands[] =
-{ //  category              actor (function)
-  //  --------------------- -----------------------
-    { "evo",                &bls_help,                         },
-    { "evo",                &bls_generate,                     },
-    { "evo",                &bls_fromsecret,                   },
-    { "evo",                &protx_help,                       },
 #ifdef ENABLE_WALLET
-    { "evo",                &protx_register,                   },
-    { "evo",                &protx_register_evo,               },
-    { "evo",                &protx_register_legacy,            },
-    { "evo",                &protx_register_fund,              },
-    { "evo",                &protx_register_fund_legacy,       },
-    { "evo",                &protx_register_fund_evo,          },
-    { "evo",                &protx_register_prepare,           },
-    { "evo",                &protx_register_prepare_evo,       },
-    { "evo",                &protx_register_prepare_legacy,    },
-    { "evo",                &protx_update_service,             },
-    { "evo",                &protx_update_service_evo,         },
-    { "evo",                &protx_register_submit,            },
-    { "evo",                &protx_update_registrar,           },
-    { "evo",                &protx_update_registrar_legacy,    },
-    { "evo",                &protx_revoke,                     },
-#endif
-    { "evo",                &protx_list,                       },
-    { "evo",                &protx_info,                       },
-    { "evo",                &protx_diff,                       },
-    { "evo",                &protx_listdiff,                   },
-};
-// clang-format on
+Span<const CRPCCommand> GetWalletEvoRPCCommands()
+{
+    static const CRPCCommand commands[]{
+        {"evo", &protx_list},
+        {"evo", &protx_info},
+        {"evo", &protx_register},
+        {"evo", &protx_register_evo},
+        {"evo", &protx_register_fund},
+        {"evo", &protx_register_fund_evo},
+        {"evo", &protx_register_prepare},
+        {"evo", &protx_register_prepare_evo},
+        {"evo", &protx_update_service},
+        {"evo", &protx_update_service_evo},
+        {"evo", &protx_register_submit},
+        {"evo", &protx_update_registrar},
+        {"evo", &protx_revoke},
+        {"hidden", &protx_register_legacy},
+        {"hidden", &protx_register_fund_legacy},
+        {"hidden", &protx_register_prepare_legacy},
+        {"hidden", &protx_update_registrar_legacy},
+    };
+    return commands;
+}
+#endif // ENABLE_WALLET
+
+void RegisterEvoRPCCommands(CRPCTable& tableRPC)
+{
+    static const CRPCCommand commands[]{
+        {"evo", &bls_help},
+        {"evo", &bls_generate},
+        {"evo", &bls_fromsecret},
+        {"evo", &protx_help},
+        {"evo", &protx_diff},
+        {"evo", &protx_listdiff},
+        {"hidden", &evodb_verify},
+        {"hidden", &evodb_repair},
+    };
+    static const CRPCCommand commands_wallet[]{
+        {"evo", &protx_list},
+        {"evo", &protx_info},
+    };
     for (const auto& command : commands) {
         tableRPC.appendCommand(command.name, &command);
+    }
+    // If we aren't compiling with wallet support, we still need to register RPCs that are
+    // capable of working without wallet support. We have to do this even if wallet support
+    // is compiled in but is disabled at runtime because runtime disablement prohibits
+    // registering wallet RPCs. We still want the reduced functionality RPC to be registered.
+    // TODO: Spin off these hybrid RPCs into dedicated wallet-only and/or wallet-free RPCs
+    //       and get rid of this workaround.
+    if (!g_wallet_init_interface.HasWalletSupport()
+#ifdef ENABLE_WALLET
+        || gArgs.GetBoolArg("-disablewallet", DEFAULT_DISABLE_WALLET)
+#endif // ENABLE_WALLET
+    ) {
+        for (const auto& command : commands_wallet) {
+            tableRPC.appendCommand(command.name, &command);
+        }
     }
 }

@@ -1,5 +1,5 @@
-// Copyright (c) 2009-2020 The Bitcoin Core developers
-// Copyright (c) 2014-2024 The Dash Core developers
+// Copyright (c) 2009-2021 The Bitcoin Core developers
+// Copyright (c) 2014-2025 The Dash Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -7,10 +7,11 @@
 #include <config/bitcoin-config.h>
 #endif
 
+#include <interfaces/init.h>
 #include <interfaces/node.h>
 #include <qt/bitcoin.h>
-#include <qt/initexecutor.h>
 #include <qt/test/apptests.h>
+#include <qt/test/optiontests.h>
 #include <qt/test/rpcnestedtests.h>
 #include <qt/test/uritests.h>
 #include <qt/test/trafficgraphdatatests.h>
@@ -22,8 +23,10 @@
 #endif // ENABLE_WALLET
 
 #include <QApplication>
+#include <QDebug>
 #include <QObject>
 #include <QTest>
+
 #include <functional>
 
 #if defined(QT_STATIC)
@@ -37,6 +40,8 @@ Q_IMPORT_PLUGIN(QXcbIntegrationPlugin);
 Q_IMPORT_PLUGIN(QWindowsIntegrationPlugin);
 #elif defined(QT_QPA_PLATFORM_COCOA)
 Q_IMPORT_PLUGIN(QCocoaIntegrationPlugin);
+#elif defined(QT_QPA_PLATFORM_ANDROID)
+Q_IMPORT_PLUGIN(QAndroidPlatformIntegrationPlugin)
 #endif
 #endif
 
@@ -53,12 +58,12 @@ int main(int argc, char* argv[])
     // regtest params.
     //
     // All tests must use their own testing setup (if needed).
-    {
+    fs::create_directories([] {
         BasicTestingSetup dummy{CBaseChainParams::REGTEST};
-    }
+        return gArgs.GetDataDirNet() / "blocks";
+    }());
 
-    NodeContext node_context;
-    std::unique_ptr<interfaces::Node> node = interfaces::MakeNode(&node_context);
+    std::unique_ptr<interfaces::Init> init = interfaces::MakeGuiInit(argc, argv);
     gArgs.ForceSetArg("-listen", "0");
     gArgs.ForceSetArg("-listenonion", "0");
     gArgs.ForceSetArg("-discover", "0");
@@ -66,8 +71,6 @@ int main(int argc, char* argv[])
     gArgs.ForceSetArg("-fixedseeds", "0");
     gArgs.ForceSetArg("-upnp", "0");
     gArgs.ForceSetArg("-natpmp", "0");
-
-    bool fInvalid = false;
 
     // Prefer the "minimal" platform for the test instead of the normal default
     // platform ("xcb", "windows", or "cocoa") so tests can't unintentionally
@@ -79,35 +82,37 @@ int main(int argc, char* argv[])
     #endif
 
     BitcoinApplication app;
-    app.setNode(*node);
     app.setApplicationName("Dash-Qt-test");
+    app.createNode(*init);
 
-    app.node().context()->args = &gArgs;     // Make gArgs available in the NodeContext
+    int num_test_failures{0};
+
     AppTests app_tests(app);
-    if (QTest::qExec(&app_tests) != 0) {
-        fInvalid = true;
-    }
+    num_test_failures += QTest::qExec(&app_tests);
+
+    OptionTests options_tests(app.node());
+    num_test_failures += QTest::qExec(&options_tests);
+
     URITests test1;
-    if (QTest::qExec(&test1) != 0) {
-        fInvalid = true;
-    }
+    num_test_failures += QTest::qExec(&test1);
+
     RPCNestedTests test3(app.node());
-    if (QTest::qExec(&test3) != 0) {
-        fInvalid = true;
-    }
+    num_test_failures += QTest::qExec(&test3);
+
 #ifdef ENABLE_WALLET
     WalletTests test5(app.node());
-    if (QTest::qExec(&test5) != 0) {
-        fInvalid = true;
-    }
-    AddressBookTests test6(app.node());
-    if (QTest::qExec(&test6) != 0) {
-        fInvalid = true;
-    }
-#endif
+    num_test_failures += QTest::qExec(&test5);
 
+    AddressBookTests test6(app.node());
+    num_test_failures += QTest::qExec(&test6);
+#endif
     TrafficGraphDataTests test7;
-    if (QTest::qExec(&test7) != 0)
-        fInvalid = true;
-    return fInvalid;
+    num_test_failures += QTest::qExec(&test7);
+
+    if (num_test_failures) {
+        qWarning("\nFailed tests: %d\n", num_test_failures);
+    } else {
+        qDebug("\nAll tests passed.\n");
+    }
+    return num_test_failures;
 }

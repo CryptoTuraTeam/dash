@@ -7,29 +7,27 @@
 Test that permissions are correctly calculated and applied
 """
 
-from test_framework.address import ADDRESS_BCRT1_P2SH_OP_TRUE
 from test_framework.messages import (
-    tx_from_hex,
+    SEQUENCE_FINAL,
 )
 from test_framework.p2p import P2PDataStore
-from test_framework.script import (
-    CScript,
-    OP_TRUE,
-)
 from test_framework.test_node import ErrorMatch
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_equal,
     p2p_port,
 )
+from test_framework.wallet import MiniWallet
 
 
 class P2PPermissionsTests(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 2
-        self.setup_clean_chain = True
 
     def run_test(self):
+        self.wallet = MiniWallet(self.nodes[0])
+        self.wallet.rescan_utxos()
+
         self.check_tx_relay()
 
         self.checkpermission(
@@ -59,12 +57,12 @@ class P2PPermissionsTests(BitcoinTestFramework):
         # For this, we need to use whitebind instead of bind
         # by modifying the configuration file.
         ip_port = "127.0.0.1:{}".format(p2p_port(1))
-        self.replaceinconfig(1, "bind=127.0.0.1", "whitebind=bloomfilter,forcerelay@" + ip_port)
+        self.nodes[1].replace_in_config([("bind=127.0.0.1", "whitebind=bloomfilter,forcerelay@" + ip_port)])
         self.checkpermission(
             ["-whitelist=noban@127.0.0.1"],
             # Check parameter interaction forcerelay should activate relay
             ["noban", "bloomfilter", "forcerelay", "relay", "download"])
-        self.replaceinconfig(1, "whitebind=bloomfilter,forcerelay@" + ip_port, "bind=127.0.0.1")
+        self.nodes[1].replace_in_config([("whitebind=bloomfilter,forcerelay@" + ip_port, "bind=127.0.0.1")])
 
         self.checkpermission(
             # legacy whitelistrelay should be ignored
@@ -93,8 +91,6 @@ class P2PPermissionsTests(BitcoinTestFramework):
         self.nodes[1].assert_start_raises_init_error(["-whitebind=noban@127.0.0.1", "-bind=127.0.0.1", "-listen=0"], "Cannot set -bind or -whitebind together with -listen=0", match=ErrorMatch.PARTIAL_REGEX)
 
     def check_tx_relay(self):
-        block_op_true = self.nodes[0].getblock(self.generatetoaddress(self.nodes[0], 100, ADDRESS_BCRT1_P2SH_OP_TRUE)[0])
-
         self.log.debug("Create a connection from a forcerelay peer that rebroadcasts raw txs")
         # A test framework p2p connection is needed to send the raw transaction directly. If a full node was used, it could only
         # rebroadcast via the inv-getdata mechanism. However, even for forcerelay connections, a full node would
@@ -103,16 +99,7 @@ class P2PPermissionsTests(BitcoinTestFramework):
         p2p_rebroadcast_wallet = self.nodes[1].add_p2p_connection(P2PDataStore())
 
         self.log.debug("Send a tx from the wallet initially")
-        tx = tx_from_hex(
-            self.nodes[0].createrawtransaction(
-                inputs=[{
-                    'txid': block_op_true['tx'][0],
-                    'vout': 0,
-                }], outputs=[{
-                    ADDRESS_BCRT1_P2SH_OP_TRUE: 5,
-                }]),
-        )
-        tx.vin[0].scriptSig = CScript([CScript([OP_TRUE])])
+        tx = self.wallet.create_self_transfer(sequence=SEQUENCE_FINAL)['tx']
         txid = tx.rehash()
 
         self.log.debug("Wait until tx is in node[1]'s mempool")
@@ -156,12 +143,6 @@ class P2PPermissionsTests(BitcoinTestFramework):
         for p in expectedPermissions:
             if p not in peerinfo['permissions']:
                 raise AssertionError("Expected permissions %r is not granted." % p)
-
-    def replaceinconfig(self, nodeid, old, new):
-        with open(self.nodes[nodeid].bitcoinconf, encoding="utf8") as f:
-            newText = f.read().replace(old, new)
-        with open(self.nodes[nodeid].bitcoinconf, 'w', encoding="utf8") as f:
-            f.write(newText)
 
 
 if __name__ == '__main__':

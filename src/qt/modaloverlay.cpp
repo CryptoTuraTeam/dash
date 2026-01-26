@@ -1,4 +1,4 @@
-// Copyright (c) 2016-2020 The Bitcoin Core developers
+// Copyright (c) 2016-2021 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -7,19 +7,15 @@
 
 #include <chainparams.h>
 #include <qt/guiutil.h>
+#include <qt/guiutil_font.h>
 
 #include <QEasingCurve>
-#include <QPropertyAnimation>
 #include <QResizeEvent>
 
-ModalOverlay::ModalOverlay(bool enable_wallet, QWidget *parent) :
-QWidget(parent),
-ui(new Ui::ModalOverlay),
-bestHeaderHeight(0),
-bestHeaderDate(QDateTime()),
-layerIsVisible(false),
-userClosed(false),
-foreverHidden(false)
+ModalOverlay::ModalOverlay(bool enable_wallet, QWidget* parent)
+    : QWidget(parent),
+      ui(new Ui::ModalOverlay),
+      bestHeaderDate(QDateTime())
 {
     ui->setupUi(this);
 
@@ -29,7 +25,7 @@ foreverHidden(false)
                       ui->labelSyncDone,
                       ui->labelProgressIncrease,
                       ui->labelEstimatedTimeLeft,
-                     }, GUIUtil::FontWeight::Bold);
+                     }, {GUIUtil::g_font_registry.GetWeightBold()});
 
     ui->warningIcon->setPixmap(GUIUtil::getIcon("warning", GUIUtil::ThemedColor::ORANGE).pixmap(48, 48));
 

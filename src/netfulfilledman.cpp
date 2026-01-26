@@ -6,11 +6,16 @@
 #include <flat-database.h>
 #include <netfulfilledman.h>
 #include <shutdown.h>
-#include <util/system.h>
 
 CNetFulfilledRequestManager::CNetFulfilledRequestManager() :
     m_db{std::make_unique<db_type>("netfulfilled.dat", "magicFulfilledCache")}
 {
+}
+
+CNetFulfilledRequestManager::~CNetFulfilledRequestManager()
+{
+    if (!is_valid) return;
+    m_db->Store(*this);
 }
 
 bool CNetFulfilledRequestManager::LoadCache(bool load_cache)
@@ -21,12 +26,6 @@ bool CNetFulfilledRequestManager::LoadCache(bool load_cache)
         CheckAndRemove();
     }
     return is_valid;
-}
-
-CNetFulfilledRequestManager::~CNetFulfilledRequestManager()
-{
-    if (!is_valid) return;
-    m_db->Store(*this);
 }
 
 void CNetFulfilledRequestManager::AddFulfilledRequest(const CService& addr, const std::string& strRequest)
@@ -87,9 +86,7 @@ void NetFulfilledRequestStore::Clear()
 
 std::string NetFulfilledRequestStore::ToString() const
 {
-    std::ostringstream info;
-    info << "Nodes with fulfilled requests: " << (int)mapFulfilledRequests.size();
-    return info.str();
+    return strprintf("Nodes with fulfilled requests: %d", mapFulfilledRequests.size());
 }
 
 void CNetFulfilledRequestManager::DoMaintenance()

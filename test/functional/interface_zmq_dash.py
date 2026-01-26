@@ -12,7 +12,10 @@ import random
 import struct
 import time
 
-from test_framework.test_framework import DashTestFramework
+from test_framework.test_framework import (
+    DashTestFramework,
+    MasternodeInfo,
+)
 from test_framework.p2p import P2PInterface
 from test_framework.util import (
     assert_equal,
@@ -148,7 +151,7 @@ class DashZMQTest (DashTestFramework):
             # has been sent which leads to test failure.
             time.sleep(1)
             # Test all dash related ZMQ publisher
-            #self.test_recovered_signature_publishers()
+            self.test_recovered_signature_publishers()
             self.test_chainlock_publishers()
             self.test_governance_publishers()
             self.test_getzmqnotifications()
@@ -166,7 +169,7 @@ class DashZMQTest (DashTestFramework):
 
     def generate_blocks(self, num_blocks):
         mninfos_online = self.mninfo.copy()
-        nodes = [self.nodes[0]] + [mn.node for mn in mninfos_online]
+        nodes = [self.nodes[0]] + [mn.get_node(self) for mn in mninfos_online]
         self.generate(self.nodes[0], num_blocks, sync_fun=lambda: self.sync_blocks(nodes))
 
     def subscribe(self, publishers):
@@ -189,7 +192,7 @@ class DashZMQTest (DashTestFramework):
         def validate_recovered_sig(request_id, msg_hash):
             # Make sure the recovered sig exists by RPC
             self.wait_for_recovered_sig(request_id, msg_hash)
-            rpc_recovered_sig = self.mninfo[0].node.quorum('getrecsig', 103, request_id, msg_hash)
+            rpc_recovered_sig = self.mninfo[0].get_node(self).quorum('getrecsig', 100, request_id, msg_hash)
             # Validate hashrecoveredsig
             zmq_recovered_sig_hash = self.subscribers[ZMQPublisher.hash_recovered_sig].receive().read(32).hex()
             assert_equal(zmq_recovered_sig_hash, msg_hash)
@@ -218,8 +221,9 @@ class DashZMQTest (DashTestFramework):
         # Sign an arbitrary and make sure this leads to valid recovered sig ZMQ messages
         sign_id = uint256_to_string(random.getrandbits(256))
         sign_msg_hash = uint256_to_string(random.getrandbits(256))
-        for mn in self.get_quorum_masternodes(self.quorum_hash):
-            mn.node.quorum("sign", self.quorum_type, sign_id, sign_msg_hash)
+        quorumHash = self.nodes[0].quorum("selectquorum", 100, sign_id)["quorumHash"]
+        for mn in self.get_quorum_masternodes(quorumHash): # type: MasternodeInfo
+            mn.get_node(self).quorum("sign", 100, sign_id, sign_msg_hash)
         validate_recovered_sig(sign_id, sign_msg_hash)
         # Unsubscribe from recovered signature messages
         self.unsubscribe(recovered_sig_publishers)
@@ -289,6 +293,7 @@ class DashZMQTest (DashTestFramework):
         assert_equal(['None'], self.nodes[0].getislocks([rpc_raw_tx_1['txid']]))
         # Send the first transaction and wait for the InstantLock
         rpc_raw_tx_1_hash = self.nodes[0].sendrawtransaction(rpc_raw_tx_1['hex'])
+        self.bump_mocktime(30)
         self.wait_for_instantlock(rpc_raw_tx_1_hash, self.nodes[0])
         # Validate hashtxlock
         zmq_tx_lock_hash = self.subscribers[ZMQPublisher.hash_tx_lock].receive().read(32).hex()
@@ -341,6 +346,7 @@ class DashZMQTest (DashTestFramework):
             pass
         # Now send the tx itself
         self.test_node.send_tx(from_hex(msg_tx(),rpc_raw_tx_3['hex']))
+        self.bump_mocktime(30)
         self.wait_for_instantlock(rpc_raw_tx_3['txid'], self.nodes[0])
         # Validate hashtxlock
         zmq_tx_lock_hash = self.subscribers[ZMQPublisher.hash_tx_lock].receive().read(32).hex()
@@ -374,6 +380,7 @@ class DashZMQTest (DashTestFramework):
         }
         proposal_hex = ''.join(format(x, '02x') for x in json.dumps(proposal_data).encode())
         collateral = self.nodes[0].gobject("prepare", "0", proposal_rev, proposal_time, proposal_hex)
+        self.bump_mocktime(30)
         self.wait_for_instantlock(collateral, self.nodes[0])
         self.generate(self.nodes[0], 6, sync_fun=lambda: self.sync_blocks())
         rpc_proposal_hash = self.nodes[0].gobject("submit", "0", proposal_rev, proposal_time, proposal_hex, collateral)

@@ -5,16 +5,19 @@
 #ifndef BITCOIN_LLMQ_COMMITMENT_H
 #define BITCOIN_LLMQ_COMMITMENT_H
 
-#include <bls/bls.h>
-#include <llmq/params.h>
 #include <primitives/transaction.h>
 #include <util/irange.h>
 #include <util/strencodings.h>
 #include <util/underlying.h>
 
+#include <bls/bls.h>
+#include <llmq/params.h>
+#include <llmq/types.h>
+
 #include <gsl/pointers.h>
 #include <univalue.h>
 
+#include <algorithm>
 #include <limits>
 #include <memory>
 #include <string>
@@ -24,11 +27,18 @@ class CBlockIndex;
 class CDeterministicMNManager;
 class ChainstateManager;
 class TxValidationState;
-
-namespace llmq
-{
+template <typename T>
+class CCheckQueueControl;
+struct RPCResult;
+namespace llmq {
 class CQuorumSnapshotManager;
+struct UtilParameters;
+namespace utils {
+struct BlsCheck;
+} // namespace utils
+} // namespace llmq
 
+namespace llmq {
 // This message is an aggregation of all received premature commitments and only valid if
 // enough (>=threshold) premature commitments were aggregated
 // This is mined on-chain as part of TRANSACTION_QUORUM_COMMITMENT
@@ -66,8 +76,9 @@ public:
         return int(std::count(validMembers.begin(), validMembers.end(), true));
     }
 
-    bool Verify(CDeterministicMNManager& dmnman, CQuorumSnapshotManager& qsnapman,
-                gsl::not_null<const CBlockIndex*> pQuorumBaseBlockIndex, bool checkSigs) const;
+    bool VerifySignatureAsync(const llmq::UtilParameters& util_params,
+                              CCheckQueueControl<utils::BlsCheck>* queue_control) const;
+    bool Verify(const llmq::UtilParameters& util_params, bool checkSigs) const;
     bool VerifyNull() const;
     bool VerifySizes(const Consensus::LLMQParams& params) const;
 
@@ -119,24 +130,8 @@ public:
         return true;
     }
 
-    [[nodiscard]] UniValue ToJson() const
-    {
-        UniValue obj;
-        obj.setObject();
-        obj.pushKV("version", int{nVersion});
-        obj.pushKV("llmqType", ToUnderlying(llmqType));
-        obj.pushKV("quorumHash", quorumHash.ToString());
-        obj.pushKV("quorumIndex", quorumIndex);
-        obj.pushKV("signersCount", CountSigners());
-        obj.pushKV("signers", BitsVectorToHexStr(signers));
-        obj.pushKV("validMembersCount", CountValidMembers());
-        obj.pushKV("validMembers", BitsVectorToHexStr(validMembers));
-        obj.pushKV("quorumPublicKey", quorumPublicKey.ToString(nVersion == LEGACY_BLS_NON_INDEXED_QUORUM_VERSION || nVersion == LEGACY_BLS_INDEXED_QUORUM_VERSION));
-        obj.pushKV("quorumVvecHash", quorumVvecHash.ToString());
-        obj.pushKV("quorumSig", quorumSig.ToString(nVersion == LEGACY_BLS_NON_INDEXED_QUORUM_VERSION || nVersion == LEGACY_BLS_INDEXED_QUORUM_VERSION));
-        obj.pushKV("membersSig", membersSig.ToString(nVersion == LEGACY_BLS_NON_INDEXED_QUORUM_VERSION || nVersion == LEGACY_BLS_INDEXED_QUORUM_VERSION));
-        return obj;
-    }
+    [[nodiscard]] static RPCResult GetJsonHelp(const std::string& key, bool optional);
+    [[nodiscard]] UniValue ToJson() const;
 
 private:
     static std::string BitsVectorToHexStr(const std::vector<bool>& vBits)
@@ -148,7 +143,6 @@ private:
         return HexStr(vBytes);
     }
 };
-using CFinalCommitmentPtr = std::unique_ptr<CFinalCommitment>;
 
 class CFinalCommitmentTxPayload
 {
@@ -166,20 +160,11 @@ public:
         READWRITE(obj.nVersion, obj.nHeight, obj.commitment);
     }
 
-    [[nodiscard]] UniValue ToJson() const
-    {
-        UniValue obj;
-        obj.setObject();
-        obj.pushKV("version", int{nVersion});
-        obj.pushKV("height", int(nHeight));
-        obj.pushKV("commitment", commitment.ToJson());
-        return obj;
-    }
+    [[nodiscard]] static RPCResult GetJsonHelp(const std::string& key, bool optional);
+    [[nodiscard]] UniValue ToJson() const;
 };
 
-bool CheckLLMQCommitment(CDeterministicMNManager& dmnman, CQuorumSnapshotManager& qsnapman,
-                         const ChainstateManager& chainman, const CTransaction& tx,
-                         gsl::not_null<const CBlockIndex*> pindexPrev, TxValidationState& state);
+bool CheckLLMQCommitment(const llmq::UtilParameters& util_params, const CTransaction& tx, TxValidationState& state);
 
 uint256 BuildCommitmentHash(Consensus::LLMQType llmqType, const uint256& blockHash, const std::vector<bool>& validMembers, const CBLSPublicKey& pubKey, const uint256& vvecHash);
 

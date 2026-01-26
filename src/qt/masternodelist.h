@@ -1,4 +1,4 @@
-// Copyright (c) 2016-2023 The Dash Core developers
+// Copyright (c) 2016-2025 The Dash Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -8,6 +8,8 @@
 #include <primitives/transaction.h>
 #include <sync.h>
 #include <util/system.h>
+
+#include <evo/types.h>
 
 #include <QMenu>
 #include <QTimer>
@@ -21,9 +23,6 @@ namespace Ui
 class MasternodeList;
 }
 
-class CDeterministicMN;
-using CDeterministicMNCPtr = std::shared_ptr<const CDeterministicMN>;
-
 class ClientModel;
 class WalletModel;
 
@@ -31,13 +30,17 @@ QT_BEGIN_NAMESPACE
 class QModelIndex;
 QT_END_NAMESPACE
 
+namespace interfaces {
+class MnEntry;
+}
+
 /** Masternode Manager page widget */
 class MasternodeList : public QWidget
 {
     Q_OBJECT
 
 public:
-    explicit MasternodeList(QWidget* parent = 0);
+    explicit MasternodeList(QWidget* parent = nullptr);
     ~MasternodeList();
 
     enum {
@@ -77,7 +80,7 @@ private:
 
     bool mnListChanged{true};
 
-    CDeterministicMNCPtr GetSelectedDIP3MN();
+    std::unique_ptr<const interfaces::MnEntry> GetSelectedDIP3MN();
 
     void updateDIP3List();
 

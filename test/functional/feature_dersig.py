@@ -50,10 +50,11 @@ class BIP66Test(BitcoinTestFramework):
         self.num_nodes = 1
         self.extra_args = [[
             f'-testactivationheight=dersig@{DERSIG_HEIGHT}',
-            '-testactivationheight=v20@9000', # due to changes in CbTx
             '-whitelist=noban@127.0.0.1',
-            '-dip3params=9000:9000',
             '-par=1',  # Use only one script thread to get the exact log msg for testing
+            '-dip3params=9000:9000',
+            '-testactivationheight=v20@9000', # due to changes in CbTx
+            '-testactivationheight=mn_rr@9000', # due to changes in CbTx
         ]]
         self.setup_clean_chain = True
         self.rpc_timeout = 240
@@ -88,9 +89,7 @@ class BIP66Test(BitcoinTestFramework):
 
         tip = self.nodes[0].getbestblockhash()
         block_time = self.nodes[0].getblockheader(tip)['mediantime'] + 1
-        block = create_block(int(tip, 16), create_coinbase(DERSIG_HEIGHT - 1), block_time)
-        block.vtx.append(spendtx)
-        block.hashMerkleRoot = block.calc_merkle_root()
+        block = create_block(int(tip, 16), create_coinbase(DERSIG_HEIGHT - 1), block_time, txlist=[spendtx])
         block.solve()
 
         assert_equal(self.nodes[0].getblockcount(), DERSIG_HEIGHT - 2)
@@ -103,8 +102,7 @@ class BIP66Test(BitcoinTestFramework):
         self.log.info("Test that blocks must now be at least version 3")
         tip = block.sha256
         block_time += 1
-        block = create_block(tip, create_coinbase(DERSIG_HEIGHT), block_time)
-        block.nVersion = 2
+        block = create_block(tip, create_coinbase(DERSIG_HEIGHT), block_time, version=2)
         block.solve()
 
         with self.nodes[0].assert_debug_log(expected_msgs=[f'{block.hash}, bad-version(0x00000002)']):

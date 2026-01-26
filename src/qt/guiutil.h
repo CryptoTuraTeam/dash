@@ -1,4 +1,4 @@
-// Copyright (c) 2011-2020 The Bitcoin Core developers
+// Copyright (c) 2011-2021 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -14,15 +14,12 @@
 
 #include <QApplication>
 #include <QEvent>
-#include <QHeaderView>
 #include <QItemDelegate>
 #include <QLabel>
-#include <QMessageBox>
 #include <QMetaObject>
 #include <QObject>
 #include <QProgressBar>
 #include <QString>
-#include <QTableView>
 
 #include <cassert>
 #include <chrono>
@@ -43,6 +40,7 @@ class QAbstractItemView;
 class QAction;
 class QButtonGroup;
 class QDateTime;
+class QDialog;
 class QFont;
 class QKeySequence;
 class QLineEdit;
@@ -127,9 +125,6 @@ namespace GUIUtil
     QString dateTimeStr(const QDateTime &datetime);
     QString dateTimeStr(qint64 nTime);
 
-    // Return a monospace font
-    QFont fixedPitchFont(bool use_embedded_font = false);
-
     // Set up widget for address
     void setupAddressWidget(QValidatedLineEdit *widget, QWidget *parent, bool fAllowURI = false);
 
@@ -190,6 +185,14 @@ namespace GUIUtil
      * Determine default data directory for operating system.
      */
     QString getDefaultDataDirectory();
+
+    /**
+     * Extract first suffix from filter pattern "Description (*.foo)" or "Description (*.foo *.bar ...).
+     *
+     * @param[in] filter Filter specification such as "Comma Separated Files (*.csv)"
+     * @return QString
+     */
+    QString ExtractFirstSuffixFromFilter(const QString& filter);
 
     /** Get save filename, mimics QFileDialog::getSaveFileName, except that it appends a default suffix
         when no suffix is provided by the user.
@@ -287,13 +290,13 @@ namespace GUIUtil
     bool isStyleSheetDirectoryCustom();
 
     /** Return a list of all required css files */
-    const std::vector<QString> listStyleSheets();
+    std::vector<QString> listStyleSheets();
 
     /** Return a list of all theme css files */
-    const std::vector<QString> listThemes();
+    std::vector<QString> listThemes();
 
     /** Return the name of the default theme `*/
-    const QString getDefaultTheme();
+    QString getDefaultTheme();
 
     /** Check if the given theme name is valid or not */
     bool isValidTheme(const QString& strTheme);
@@ -301,90 +304,6 @@ namespace GUIUtil
     /** Sets the stylesheet of the whole app and updates it if the
     related css files has been changed and -debug-ui mode is active. */
     void loadStyleSheet(bool fForceUpdate = false);
-
-    enum class FontFamily {
-        SystemDefault,
-        Montserrat,
-    };
-
-    FontFamily fontFamilyFromString(const QString& strFamily);
-    QString fontFamilyToString(FontFamily family);
-
-    /** set/get font family: GUIUtil::fontFamily */
-    FontFamily getFontFamilyDefault();
-    FontFamily getFontFamily();
-    void setFontFamily(FontFamily family);
-
-    enum class FontWeight {
-        Normal, // Font weight for normal text
-        Bold,   // Font weight for bold text
-    };
-
-    /** Convert weight value from args (0-8) to QFont::Weight */
-    bool weightFromArg(int nArg, QFont::Weight& weight);
-    /** Convert QFont::Weight to an arg value (0-8) */
-    int weightToArg(const QFont::Weight weight);
-    /** Convert GUIUtil::FontWeight to QFont::Weight */
-    QFont::Weight toQFontWeight(FontWeight weight);
-
-    /** set/get normal font weight: GUIUtil::fontWeightNormal */
-    QFont::Weight getFontWeightNormalDefault();
-    QFont::Weight getFontWeightNormal();
-    void setFontWeightNormal(QFont::Weight weight);
-
-    /** set/get bold font weight: GUIUtil::fontWeightBold */
-    QFont::Weight getFontWeightBoldDefault();
-    QFont::Weight getFontWeightBold();
-    void setFontWeightBold(QFont::Weight weight);
-
-    /** set/get font scale: GUIUtil::fontScale */
-    int getFontScaleDefault();
-    int getFontScale();
-    void setFontScale(int nScale);
-
-    /** get font size with GUIUtil::fontScale applied */
-    double getScaledFontSize(int nSize);
-
-    /** Load dash specific appliciation fonts */
-    bool loadFonts();
-    /** Check if the fonts have been loaded successfully */
-    bool fontsLoaded();
-
-    /** Set an application wide default font, depends on the selected theme */
-    void setApplicationFont();
-
-    /** Workaround to set correct font styles in all themes since there is a bug in macOS which leads to
-        issues loading variations of montserrat in css it also keeps track of the set fonts to update on
-        theme changes. */
-    void setFont(const std::vector<QWidget*>& vecWidgets, FontWeight weight, int nPointSize = -1, bool fItalic = false);
-
-    /** Update the font of all widgets where a custom font has been set with
-        GUIUtil::setFont */
-    void updateFonts();
-
-    /** Get a properly weighted QFont object with the selected font. */
-    QFont getFont(FontFamily family, QFont::Weight qWeight, bool fItalic = false, int nPointSize = -1);
-    QFont getFont(QFont::Weight qWeight, bool fItalic = false, int nPointSize = -1);
-    QFont getFont(FontWeight weight, bool fItalic = false, int nPointSize = -1);
-
-    /** Get the default normal QFont */
-    QFont getFontNormal();
-
-    /** Get the default bold QFont */
-    QFont getFontBold();
-
-    /** Return supported normal default for the current font family */
-    QFont::Weight getSupportedFontWeightNormalDefault();
-    /** Return supported bold default for the current font family */
-    QFont::Weight getSupportedFontWeightBoldDefault();
-    /** Return supported weights for the current font family */
-    std::vector<QFont::Weight> getSupportedWeights();
-    /** Convert an index to a weight in the supported weights vector */
-    QFont::Weight supportedWeightFromIndex(int nIndex);
-    /** Convert a weight to an index in the supported weights vector */
-    int supportedWeightToIndex(QFont::Weight weight);
-    /** Check if a weight is supported by the current font family */
-    bool isSupportedWeight(QFont::Weight weight);
 
     /** Return the name of the currently active theme.*/
     QString getActiveTheme();
@@ -536,18 +455,6 @@ namespace GUIUtil
     #endif
     }
 
-    /**
-     * Queue a function to run in an object's event loop. This can be
-     * replaced by a call to the QMetaObject::invokeMethod functor overload after Qt 5.10, but
-     * for now use a QObject::connect for compatibility with older Qt versions, based on
-     * https://stackoverflow.com/questions/21646467/how-to-execute-a-functor-or-a-lambda-in-a-given-thread-in-qt-gcd-style
-     */
-    template <typename Fn>
-    void ObjectInvoke(QObject* object, Fn&& function, Qt::ConnectionType connection = Qt::QueuedConnection)
-    {
-        QObject source;
-        QObject::connect(&source, &QObject::destroyed, object, std::forward<Fn>(function), connection);
-    }
 
     /**
      * Replaces a plain text link with an HTML tagged one.
@@ -599,6 +506,20 @@ namespace GUIUtil
                 assert(ok);
             },
             type);
+    }
+
+    /**
+     * Shows a QDialog instance asynchronously, and deletes it on close.
+     */
+    void ShowModalDialogAsynchronously(QDialog* dialog);
+
+    inline bool IsEscapeOrBack(int key)
+    {
+        if (key == Qt::Key_Escape) return true;
+#ifdef Q_OS_ANDROID
+        if (key == Qt::Key_Back) return true;
+#endif // Q_OS_ANDROID
+        return false;
     }
 
 } // namespace GUIUtil

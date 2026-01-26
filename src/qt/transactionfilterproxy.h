@@ -1,4 +1,4 @@
-// Copyright (c) 2011-2020 The Bitcoin Core developers
+// Copyright (c) 2011-2021 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -60,10 +60,10 @@ private:
     std::optional<QDateTime> dateTo;
     QString m_search_string;
     quint32 typeFilter;
-    WatchOnlyFilter watchOnlyFilter;
-    CAmount minAmount;
-    int limitRows;
-    bool showInactive;
+    WatchOnlyFilter watchOnlyFilter{WatchOnlyFilter_All};
+    CAmount minAmount{0};
+    int limitRows{-1};
+    bool showInactive{true};
 };
 
 #endif // BITCOIN_QT_TRANSACTIONFILTERPROXY_H

@@ -5,7 +5,7 @@
 #ifndef BITCOIN_EVO_SPECIALTXMAN_H
 #define BITCOIN_EVO_SPECIALTXMAN_H
 
-#include <consensus/amount.h>
+#include <gsl/pointers.h>
 #include <sync.h>
 #include <threadsafety.h>
 
@@ -14,8 +14,10 @@
 class BlockValidationState;
 class CBlock;
 class CBlockIndex;
+class CCbTx;
 class CCoinsViewCache;
 class CCreditPoolManager;
+class CDeterministicMNList;
 class CDeterministicMNManager;
 class CTransaction;
 class ChainstateManager;
@@ -31,7 +33,7 @@ class CQuorumManager;
 class CQuorumSnapshotManager;
 } // namespace llmq
 
-extern RecursiveMutex cs_main;
+extern RecursiveMutex cs_main; // NOLINT(readability-redundant-declaration)
 
 class CSpecialTxProcessor
 {
@@ -45,10 +47,6 @@ private:
     const Consensus::Params& m_consensus_params;
     const llmq::CChainLocksHandler& m_clhandler;
     const llmq::CQuorumManager& m_qman;
-
-private:
-    [[nodiscard]] bool ProcessSpecialTx(const CTransaction& tx, const CBlockIndex* pindex, TxValidationState& state);
-    [[nodiscard]] bool UndoSpecialTx(const CTransaction& tx, const CBlockIndex* pindex);
 
 public:
     explicit CSpecialTxProcessor(CCreditPoolManager& cpoolman, CDeterministicMNManager& dmnman, CMNHFManager& mnhfman,
@@ -68,14 +66,28 @@ public:
     }
 
     bool CheckSpecialTx(const CTransaction& tx, const CBlockIndex* pindexPrev, const CCoinsViewCache& view, bool check_sigs, TxValidationState& state)
-        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool ProcessSpecialTxsInBlock(const CBlock& block, const CBlockIndex* pindex, const CCoinsViewCache& view, bool fJustCheck,
                                   bool fCheckCbTxMerkleRoots, BlockValidationState& state, std::optional<MNListUpdates>& updatesRet)
-        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool UndoSpecialTxsInBlock(const CBlock& block, const CBlockIndex* pindex, std::optional<MNListUpdates>& updatesRet)
-        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
-    bool CheckCreditPoolDiffForBlock(const CBlock& block, const CBlockIndex* pindex, const CAmount blockSubsidy, BlockValidationState& state)
-        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+
+    // the returned list will not contain the correct block hash (we can't know it yet as the coinbase TX is not updated yet)
+    bool BuildNewListFromBlock(const CBlock& block, gsl::not_null<const CBlockIndex*> pindexPrev,
+                               const CCoinsViewCache& view, bool debugLogs, BlockValidationState& state,
+                               CDeterministicMNList& mnListRet) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
+    // Variant that takes an explicit starting list instead of loading from GetListForBlock
+    // Used for rebuilding diffs from trusted snapshots
+    bool RebuildListFromBlock(const CBlock& block, gsl::not_null<const CBlockIndex*> pindexPrev,
+                              const CDeterministicMNList& prevList, const CCoinsViewCache& view, bool debugLogs,
+                              BlockValidationState& state, CDeterministicMNList& mnListRet);
+
+private:
+    bool CheckCreditPoolDiffForBlock(const CBlock& block, const CBlockIndex* pindex, const CCbTx& cbTx,
+                                     BlockValidationState& state) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 };
 
 #endif // BITCOIN_EVO_SPECIALTXMAN_H

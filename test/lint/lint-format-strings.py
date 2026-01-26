@@ -20,8 +20,14 @@ FUNCTION_NAMES_AND_NUMBER_OF_LEADING_ARGUMENTS = [
     'fprintf,1',
     'tfm::format,1',  # Assuming tfm::::format(std::ostream&, ...
     'LogConnectFailure,1',
+    'LogError,0',
+    'LogWarning,0',
+    'LogInfo,0',
+    'LogDebug,1',
+    'LogTrace,1',
     'LogPrint,1',
     'LogPrintf,0',
+    'LogPrintfCategory,1',
     'LogPrintLevel,2',
     'printf,0',
     'snprintf,2',
@@ -37,7 +43,7 @@ RUN_LINT_FILE = 'test/lint/run-lint-format-strings.py'
 
 def check_doctest():
     command = [
-        'python3',
+        sys.executable,
         '-m',
         'doctest',
         RUN_LINT_FILE,
@@ -76,7 +82,7 @@ def main():
 
         matching_files_filtered = []
         for matching_file in matching_files:
-            if not re.search('^src/(dashbls|leveldb|secp256k1|minisketch|tinyformat|univalue|test/fuzz/strprintf.cpp)', matching_file):
+            if not re.search('^src/(dashbls|leveldb|secp256k1|minisketch|tinyformat|test/fuzz/strprintf.cpp|clientversion.cpp)', matching_file):
                 matching_files_filtered.append(matching_file)
         matching_files_filtered.sort()
 

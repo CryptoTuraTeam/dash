@@ -1,5 +1,5 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2020 The Bitcoin Core developers
+// Copyright (c) 2009-2021 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -54,6 +54,7 @@ public:
 
     /**
      * Return the fee in satoshis for the given size in vbytes.
+     * If the calculated fee would have fractional satoshis, then the returned fee will always be rounded up to the nearest satoshi.
      */
     CAmount GetFee(uint32_t num_bytes) const;
 

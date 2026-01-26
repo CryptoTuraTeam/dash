@@ -1,5 +1,5 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2020 The Bitcoin Core developers
+// Copyright (c) 2009-2021 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -8,8 +8,9 @@
 
 #include <compat/compat.h>
 
-#include <chrono>
-#include <stdint.h>
+#include <atomic>
+#include <chrono> // IWYU pragma: export
+#include <cstdint>
 #include <string>
 
 using namespace std::chrono_literals;
@@ -28,6 +29,41 @@ using SteadyClock = std::chrono::steady_clock;
 using SteadySeconds = std::chrono::time_point<std::chrono::steady_clock, std::chrono::seconds>;
 using SteadyMilliseconds = std::chrono::time_point<std::chrono::steady_clock, std::chrono::milliseconds>;
 using SteadyMicroseconds = std::chrono::time_point<std::chrono::steady_clock, std::chrono::microseconds>;
+
+using SystemClock = std::chrono::system_clock;
+
+/**
+ * Thread-safe cleanup interval throttler.
+ * Ensures cleanup functions don't run more frequently than specified interval.
+ */
+template<typename ClockType = NodeClock>
+class CleanupThrottler {
+private:
+    std::atomic<typename ClockType::time_point> nextCleanup{typename ClockType::time_point{}};
+
+public:
+    /**
+     * Attempt to claim a cleanup slot.
+     * @param interval Minimum time between cleanups
+     * @return true if cleanup should proceed, false if throttled
+     */
+    bool TryCleanup(typename ClockType::duration interval) {
+        auto now = ClockType::now();
+        auto expected = nextCleanup.load(std::memory_order_relaxed);
+
+        // Cleanup not yet due
+        if (now < expected) {
+            return false;
+        }
+
+        // Atomically claim the cleanup slot
+        return nextCleanup.compare_exchange_strong(
+            expected,
+            now + interval,
+            std::memory_order_relaxed
+        );
+    }
+};
 
 void UninterruptibleSleep(const std::chrono::microseconds& n);
 
@@ -59,11 +95,6 @@ using HoursDouble = std::chrono::duration<double, std::chrono::hours::period>;
 using SecondsDouble = std::chrono::duration<double, std::chrono::seconds::period>;
 
 /**
- * Helper to count the seconds in any std::chrono::duration type
- */
-inline double CountSecondsDouble(SecondsDouble t) { return t.count(); }
-
-/**
  * DEPRECATED
  * Use either ClockType::now() or Now<TimePointType>() if a cast is needed.
  * ClockType is
@@ -74,10 +105,7 @@ inline double CountSecondsDouble(SecondsDouble t) { return t.count(); }
 int64_t GetTime();
 
 /** Returns the system time (not mockable) */
-int64_t GetTimeMillis();
-/** Returns the system time (not mockable) */
 int64_t GetTimeMicros();
-
 /**
  * DEPRECATED
  * Use SetMockTime with chrono type
@@ -93,8 +121,8 @@ void SetMockTime(std::chrono::seconds mock_time_in);
 std::chrono::seconds GetMockTime();
 
 /**
- * Return the current time point cast to the given precicion. Only use this
- * when an exact precicion is needed, otherwise use T::clock::now() directly.
+ * Return the current time point cast to the given precision. Only use this
+ * when an exact precision is needed, otherwise use T::clock::now() directly.
  */
 template <typename T>
 T Now()
@@ -115,19 +143,17 @@ T GetTime()
 std::string FormatISO8601DateTime(int64_t nTime);
 std::string FormatISO8601Date(int64_t nTime);
 std::string FormatISO8601Time(int64_t nTime);
-int64_t ParseISO8601DateTime(const std::string& str);
 
 /**
  * Convert milliseconds to a struct timeval for e.g. select.
  */
 struct timeval MillisToTimeval(int64_t nTimeout);
+struct timespec MillisToTimespec(int64_t nTimeout);
 
 /**
  * Convert milliseconds to a struct timeval for e.g. select.
  */
 struct timeval MillisToTimeval(std::chrono::milliseconds ms);
-
-/** Sanity check epoch match normal Unix epoch */
-bool ChronoSanityCheck();
+struct timespec MillisToTimespec(std::chrono::milliseconds ms);
 
 #endif // BITCOIN_UTIL_TIME_H

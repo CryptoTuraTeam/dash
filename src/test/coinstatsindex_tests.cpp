@@ -1,4 +1,4 @@
-// Copyright (c) 2020 The Bitcoin Core developers
+// Copyright (c) 2020-2021 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -18,7 +18,6 @@ BOOST_FIXTURE_TEST_CASE(coinstatsindex_initial_sync, TestChain100Setup)
 {
     CoinStatsIndex coin_stats_index{1 << 20, true};
 
-    CCoinsStats coin_stats{CoinStatsHashType::MUHASH};
     const CBlockIndex* block_index;
     {
         LOCK(cs_main);
@@ -26,7 +25,7 @@ BOOST_FIXTURE_TEST_CASE(coinstatsindex_initial_sync, TestChain100Setup)
     }
 
     // CoinStatsIndex should not be found before it is started.
-    BOOST_CHECK(!coin_stats_index.LookUpStats(block_index, coin_stats));
+    BOOST_CHECK(!coin_stats_index.LookUpStats(block_index));
 
     // BlockUntilSyncedToCurrentChain should return false before CoinStatsIndex
     // is started.
@@ -42,10 +41,10 @@ BOOST_FIXTURE_TEST_CASE(coinstatsindex_initial_sync, TestChain100Setup)
         LOCK(cs_main);
         genesis_block_index = m_node.chainman->ActiveChain().Genesis();
     }
-    BOOST_CHECK(coin_stats_index.LookUpStats(genesis_block_index, coin_stats));
+    BOOST_CHECK(coin_stats_index.LookUpStats(genesis_block_index));
 
     // Check that CoinStatsIndex updates with new blocks.
-    coin_stats_index.LookUpStats(block_index, coin_stats);
+    BOOST_CHECK(coin_stats_index.LookUpStats(block_index));
 
     const CScript script_pub_key{CScript() << ToByteVector(coinbaseKey.GetPubKey()) << OP_CHECKSIG};
     std::vector<CMutableTransaction> noTxns;
@@ -54,13 +53,12 @@ BOOST_FIXTURE_TEST_CASE(coinstatsindex_initial_sync, TestChain100Setup)
     // Let the CoinStatsIndex to catch up again.
     BOOST_CHECK(coin_stats_index.BlockUntilSyncedToCurrentChain());
 
-    CCoinsStats new_coin_stats{CoinStatsHashType::MUHASH};
     const CBlockIndex* new_block_index;
     {
         LOCK(cs_main);
         new_block_index = m_node.chainman->ActiveChain().Tip();
     }
-    coin_stats_index.LookUpStats(new_block_index, new_coin_stats);
+    BOOST_CHECK(coin_stats_index.LookUpStats(new_block_index));
 
     BOOST_CHECK(block_index != new_block_index);
 

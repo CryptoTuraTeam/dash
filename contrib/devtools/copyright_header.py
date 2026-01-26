@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# Copyright (c) 2016-2020 The Bitcoin Core developers
-# Copyright (c) 2019-2024 The Dash Core developers
+# Copyright (c) 2016-2021 The Bitcoin Core developers
+# Copyright (c) 2019-2025 The Dash Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -23,10 +23,8 @@ EXCLUDE = [
     'src/bench/nanobench.h',
     'src/crypto/*',
     'src/ctpl_stl.h',
-    'src/reverse_iterator.h',
     'src/test/fuzz/FuzzedDataProvider.h',
     'src/tinyformat.h',
-    'src/util/expected.h',
     'src/wallet/bip39.cpp',
     'src/wallet/bip39.h',
     'src/wallet/bip39_english.h',
@@ -46,7 +44,6 @@ EXCLUDE_DIRS = [
     "src/leveldb/",
     "src/minisketch",
     "src/secp256k1/",
-    "src/univalue/",
 ]
 
 INCLUDE = ['*.h', '*.cpp', '*.cc', '*.c', '*.mm', '*.py', '*.sh', '*.bash-completion']
@@ -333,15 +330,13 @@ def get_most_recent_git_change_year(filename):
 ################################################################################
 
 def read_file_lines(filename):
-    f = open(filename, 'r', encoding="utf8")
-    file_lines = f.readlines()
-    f.close()
+    with open(filename, 'r', encoding="utf8") as f:
+        file_lines = f.readlines()
     return file_lines
 
 def write_file_lines(filename, file_lines):
-    f = open(filename, 'w', encoding="utf8")
-    f.write(''.join(file_lines))
-    f.close()
+    with open(filename, 'w', encoding="utf8") as f:
+        f.write(''.join(file_lines))
 
 ################################################################################
 # update header years execution
@@ -384,7 +379,7 @@ def create_updated_copyright_line(line, last_git_change_year):
     space_split = after_copyright.split(' ')
     year_range = space_split[0]
     start_year, end_year = parse_year_range(year_range)
-    if end_year == last_git_change_year:
+    if end_year >= last_git_change_year:
         return line
     return (before_copyright + copyright_splitter +
             year_range_to_str(start_year, last_git_change_year) + ' ' +

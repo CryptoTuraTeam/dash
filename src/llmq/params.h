@@ -37,7 +37,7 @@ enum class LLMQType : uint8_t {
     LLMQ_TEST_PLATFORM = 106,    // 3 members, 2 (66%) threshold, one per hour.
 
     // for devnets only. rotated version (v2) for devnets
-    LLMQ_DEVNET_DIP0024 = 105 // 8 members, 4 (50%) threshold, one per hour. Params might differ when -llmqdevnetparams is used
+    LLMQ_DEVNET_DIP0024 = 105, // 8 members, 4 (50%) threshold, one per hour. Params might differ when -llmqdevnetparams is used
 };
 
 // Configures a LLMQ and its DKG
@@ -121,6 +121,7 @@ public:
 
     // For how many blocks recent DKG info should be kept
     [[nodiscard]] constexpr int max_store_depth() const { return max_cycles(keepOldKeys) * dkgInterval; }
+    [[nodiscard]] constexpr bool is_single_member() const { return size == 1; }
 };
 
 //static_assert(std::is_trivial_v<Consensus::LLMQParams>, "LLMQParams is not a trivial type");

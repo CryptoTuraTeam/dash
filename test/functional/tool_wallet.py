@@ -4,7 +4,6 @@
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test dash-wallet."""
 
-import hashlib
 import os
 import stat
 import subprocess
@@ -13,9 +12,10 @@ import textwrap
 from collections import OrderedDict
 
 from test_framework.test_framework import BitcoinTestFramework
-from test_framework.util import assert_equal
-
-BUFFER_SIZE = 16 * 1024
+from test_framework.util import (
+    assert_equal,
+    sha256sum_file,
+)
 
 class ToolWalletTest(BitcoinTestFramework):
     def set_test_params(self):
@@ -28,12 +28,11 @@ class ToolWalletTest(BitcoinTestFramework):
         self.skip_if_no_wallet_tool()
 
     def dash_wallet_process(self, *args):
-        binary = self.config["environment"]["BUILDDIR"] + '/src/dash-wallet' + self.config["environment"]["EXEEXT"]
         default_args = ['-datadir={}'.format(self.nodes[0].datadir), '-chain=%s' % self.chain]
         if self.options.descriptors and 'create' in args:
             default_args.append('-descriptors')
 
-        return subprocess.Popen([binary] + default_args + list(args), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+        return subprocess.Popen([self.options.bitcoinwallet] + default_args + list(args), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
     def assert_raises_tool_error(self, error, *args):
         p = self.dash_wallet_process(*args)
@@ -50,12 +49,7 @@ class ToolWalletTest(BitcoinTestFramework):
         assert_equal(p.poll(), 0)
 
     def wallet_shasum(self):
-        h = hashlib.sha1()
-        mv = memoryview(bytearray(BUFFER_SIZE))
-        with open(self.wallet_path, 'rb', buffering=0) as f:
-            for n in iter(lambda : f.readinto(mv), 0):
-                h.update(mv[:n])
-        return h.hexdigest()
+        return sha256sum_file(self.wallet_path).hex()
 
     def wallet_timestamp(self):
         return os.path.getmtime(self.wallet_path)
@@ -192,7 +186,7 @@ class ToolWalletTest(BitcoinTestFramework):
         locked_dir = os.path.join(self.options.tmpdir, "node0", self.chain, "wallets")
         error = 'Error initializing wallet database environment "{}"!'.format(locked_dir)
         if self.options.descriptors:
-            error = "SQLiteDatabase: Unable to obtain an exclusive lock on the database, is it being used by another dashd?"
+            error = f"SQLiteDatabase: Unable to obtain an exclusive lock on the database, is it being used by another instance of {self.config['environment']['PACKAGE_NAME']}?"
         self.assert_raises_tool_error(
             error,
             '-wallet=' + self.default_wallet_name,
@@ -353,7 +347,7 @@ class ToolWalletTest(BitcoinTestFramework):
         non_exist_dump = os.path.join(self.nodes[0].datadir, "wallet.nodump")
         self.assert_raises_tool_error('Unknown wallet file format "notaformat" provided. Please provide one of "bdb" or "sqlite".', '-wallet=todump', '-format=notaformat', '-dumpfile={}'.format(wallet_dump), 'createfromdump')
         self.assert_raises_tool_error('Dump file {} does not exist.'.format(non_exist_dump), '-wallet=todump', '-dumpfile={}'.format(non_exist_dump), 'createfromdump')
-        wallet_path = os.path.join(self.nodes[0].datadir, 'regtest/wallets/todump2')
+        wallet_path = os.path.join(self.nodes[0].datadir, 'regtest', 'wallets', 'todump2')
         self.assert_raises_tool_error('Failed to create database path \'{}\'. Database already exists.'.format(wallet_path), '-wallet=todump2', '-dumpfile={}'.format(wallet_dump), 'createfromdump')
         self.assert_raises_tool_error("The -descriptors option can only be used with the 'create' command.", '-descriptors', '-wallet=todump2', '-dumpfile={}'.format(wallet_dump), 'createfromdump')
 
@@ -368,12 +362,12 @@ class ToolWalletTest(BitcoinTestFramework):
         bad_ver_wallet_dump = os.path.join(self.nodes[0].datadir, "wallet-bad_ver1.dump")
         dump_data["BITCOIN_CORE_WALLET_DUMP"] = "0"
         self.write_dump(dump_data, bad_ver_wallet_dump)
-        self.assert_raises_tool_error('Error: Dumpfile version is not supported. This version of bitcoin-wallet only supports version 1 dumpfiles. Got dumpfile with version 0', '-wallet=badload', '-dumpfile={}'.format(bad_ver_wallet_dump), 'createfromdump')
+        self.assert_raises_tool_error('Error: Dumpfile version is not supported. This version of dash-wallet only supports version 1 dumpfiles. Got dumpfile with version 0', '-wallet=badload', '-dumpfile={}'.format(bad_ver_wallet_dump), 'createfromdump')
         assert not os.path.isdir(os.path.join(self.nodes[0].datadir, "regtest/wallets", "badload"))
         bad_ver_wallet_dump = os.path.join(self.nodes[0].datadir, "wallet-bad_ver2.dump")
         dump_data["BITCOIN_CORE_WALLET_DUMP"] = "2"
         self.write_dump(dump_data, bad_ver_wallet_dump)
-        self.assert_raises_tool_error('Error: Dumpfile version is not supported. This version of bitcoin-wallet only supports version 1 dumpfiles. Got dumpfile with version 2', '-wallet=badload', '-dumpfile={}'.format(bad_ver_wallet_dump), 'createfromdump')
+        self.assert_raises_tool_error('Error: Dumpfile version is not supported. This version of dash-wallet only supports version 1 dumpfiles. Got dumpfile with version 2', '-wallet=badload', '-dumpfile={}'.format(bad_ver_wallet_dump), 'createfromdump')
         assert not os.path.isdir(os.path.join(self.nodes[0].datadir, "regtest/wallets", "badload"))
         bad_magic_wallet_dump = os.path.join(self.nodes[0].datadir, "wallet-bad_magic.dump")
         del dump_data["BITCOIN_CORE_WALLET_DUMP"]

@@ -1,5 +1,5 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2020 The Bitcoin Core developers
+// Copyright (c) 2009-2021 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -10,23 +10,30 @@
 #include <validationinterface.h>
 #include <version.h>
 
+#include <msg_result.h>
+
 #include <atomic>
 
-class CActiveMasternodeManager;
 class AddrMan;
-class CTxMemPool;
+class CActiveMasternodeManager;
 class CCoinJoinQueue;
 class CDeterministicMNManager;
+class CDSTXManager;
+class CGovernanceManager;
+class ChainstateManager;
+class CInv;
+class CJWalletManager;
 class CMasternodeMetaMan;
 class CMasternodeSync;
-class ChainstateManager;
-class CCoinJoinServer;
-class CGovernanceManager;
-class CInv;
+class CNetMsgMaker;
 class CSporkManager;
 class CTransaction;
-struct CJContext;
+class CTxMemPool;
+struct ActiveContext;
 struct LLMQContext;
+namespace llmq {
+struct ObserverContext;
+} // namespace llmq
 
 /** Default for -maxorphantxsize, maximum size in megabytes the orphan map can grow before entries are removed */
 static const unsigned int DEFAULT_MAX_ORPHAN_TRANSACTIONS_SIZE = 10; // this allows around 100 TXs of max size (and many more of normal size)
@@ -51,17 +58,59 @@ struct CNodeStateStats {
     ServiceFlags their_services;
 };
 
-class PeerManager : public CValidationInterface, public NetEventsInterface
+class PeerManagerInternal
+{
+public:
+    virtual void PeerMisbehaving(const NodeId pnode, const int howmuch, const std::string& message = "") = 0;
+    virtual void PeerEraseObjectRequest(const NodeId nodeid, const CInv& inv) = 0;
+    virtual void PeerRelayInv(const CInv& inv) = 0;
+    virtual void PeerRelayInvFiltered(const CInv& inv, const CTransaction& relatedTx) = 0;
+    virtual void PeerRelayInvFiltered(const CInv& inv, const uint256& relatedTxHash) = 0;
+    virtual void PeerRelayTransaction(const uint256& txid) = 0;
+    virtual void PeerRelayDSQ(const CCoinJoinQueue& queue) = 0;
+    virtual void PeerAskPeersForTransaction(const uint256& txid) = 0;
+    virtual size_t PeerGetRequestedObjectCount(NodeId nodeid) const = 0;
+    virtual void PeerPostProcessMessage(MessageProcessingResult&& ret) = 0;
+};
+
+class NetHandler
+{
+public:
+    NetHandler(PeerManagerInternal* peer_manager) : m_peer_manager{Assert(peer_manager)} {}
+    virtual ~NetHandler() {
+        Interrupt();
+        Stop();
+    }
+
+    virtual void Start() {}
+    virtual void Stop() {}
+    virtual void Interrupt() {}
+    virtual void Schedule(CScheduler& scheduler) {}
+
+    virtual void ProcessMessage(CNode& pfrom, const std::string& msg_type, CDataStream& vRecv) {}
+
+    // It returns true, if NetHandler has a responsibility about having this type of inventory and has corresponding data.
+    virtual bool AlreadyHave(const CInv& inv) { return false; }
+
+    // It should return true, if there's data has been pushed
+    virtual bool ProcessGetData(CNode& pfrom, const CInv& inv, CConnman& connman, const CNetMsgMaker& msgMaker) { return false; }
+protected:
+    PeerManagerInternal* m_peer_manager;
+};
+
+
+class PeerManager : public CValidationInterface, public NetEventsInterface, public PeerManagerInternal
 {
 public:
     static std::unique_ptr<PeerManager> make(const CChainParams& chainparams, CConnman& connman, AddrMan& addrman,
-                                             BanMan* banman, ChainstateManager& chainman,
+                                             BanMan* banman, CDSTXManager& dstxman, ChainstateManager& chainman,
                                              CTxMemPool& pool, CMasternodeMetaMan& mn_metaman, CMasternodeSync& mn_sync,
                                              CGovernanceManager& govman, CSporkManager& sporkman,
-                                             const CActiveMasternodeManager* const mn_activeman,
+                                             const std::unique_ptr<ActiveContext>& active_ctx,
                                              const std::unique_ptr<CDeterministicMNManager>& dmnman,
-                                             const std::unique_ptr<CJContext>& cj_ctx,
-                                             const std::unique_ptr<LLMQContext>& llmq_ctx, bool ignore_incoming_txs);
+                                             const std::unique_ptr<CJWalletManager>& cj_walletman,
+                                             const std::unique_ptr<LLMQContext>& llmq_ctx,
+                                             const std::unique_ptr<llmq::ObserverContext>& observer_ctx, bool ignore_incoming_txs);
     virtual ~PeerManager() { }
 
     /**
@@ -85,12 +134,6 @@ public:
     /** Send ping message to all peers */
     virtual void SendPings() = 0;
 
-    /** Is an inventory in the known inventory filter. Used by InstantSend. */
-    virtual bool IsInvInFilter(NodeId nodeid, const uint256& hash) const = 0;
-
-    /** Ask a number of our peers, which have a transaction in their inventory, for the transaction. */
-    virtual void AskPeersForTransaction(const uint256& txid, bool is_masternode) = 0;
-
     /** Broadcast inventory message to a specific peer. */
     virtual void PushInventory(NodeId nodeid, const CInv& inv) = 0;
 
@@ -98,23 +141,14 @@ public:
     virtual void RelayDSQ(const CCoinJoinQueue& queue) = 0;
 
     /** Relay inventories to all peers */
-    virtual void RelayInv(CInv &inv) = 0;
-    virtual void RelayInv(CInv &inv, const int minProtoVersion) = 0;
-    virtual void RelayInvFiltered(CInv &inv, const CTransaction &relatedTx,
-                                  const int minProtoVersion = MIN_PEER_PROTO_VERSION) = 0;
-
-    /**
-     * This overload will not update node filters, use it only for the cases
-     * when other messages will update related transaction data in filters
-     */
-    virtual void RelayInvFiltered(CInv &inv, const uint256 &relatedTxHash,
-                                  const int minProtoVersion = MIN_PEER_PROTO_VERSION) = 0;
+    virtual void RelayInv(const CInv& inv) = 0;
+    virtual void RelayInv(const CInv& inv, const int minProtoVersion) = 0;
 
     /** Relay transaction to all peers. */
     virtual void RelayTransaction(const uint256& txid) = 0;
 
     /** Relay recovered sigs to all interested peers */
-    virtual void RelayRecoveredSig(const uint256& sigHash) = 0;
+    virtual void RelayRecoveredSig(const llmq::CRecoveredSig& sig, bool proactive_relay) = 0;
 
     /** Set the best height */
     virtual void SetBestHeight(int height) = 0;
@@ -142,10 +176,14 @@ public:
 
     virtual bool IsBanned(NodeId pnode) = 0;
 
-    virtual void EraseObjectRequest(NodeId nodeid, const CInv& inv) = 0;
-    virtual void RequestObject(NodeId nodeid, const CInv& inv, std::chrono::microseconds current_time,
-                               bool is_masternode, bool fForce = false) = 0;
     virtual size_t GetRequestedObjectCount(NodeId nodeid) const = 0;
+
+    virtual void AddExtraHandler(std::unique_ptr<NetHandler>&& handler) = 0;
+    virtual void RemoveHandlers() = 0;
+    virtual void StartHandlers() = 0;
+    virtual void StopHandlers() = 0;
+    virtual void InterruptHandlers() = 0;
+    virtual void ScheduleHandlers(CScheduler& scheduler) = 0;
 };
 
 #endif // BITCOIN_NET_PROCESSING_H

@@ -1,4 +1,4 @@
-// Copyright (c) 2011-2020 The Bitcoin Core developers
+// Copyright (c) 2011-2021 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -7,28 +7,25 @@
 
 #include <qt/addresstablemodel.h>
 #include <qt/guiutil.h>
+#include <qt/guiutil_font.h>
 #include <qt/optionsmodel.h>
 #include <qt/receiverequestdialog.h>
 #include <qt/recentrequeststablemodel.h>
 #include <qt/walletmodel.h>
 
-#include <QAction>
 #include <QCursor>
 #include <QMessageBox>
-#include <QScrollBar>
-#include <QTextDocument>
 
 ReceiveCoinsDialog::ReceiveCoinsDialog(QWidget* parent) :
     QDialog(parent, GUIUtil::dialog_flags),
-    ui(new Ui::ReceiveCoinsDialog),
-    model(nullptr)
+    ui(new Ui::ReceiveCoinsDialog)
 {
     ui->setupUi(this);
 
-    GUIUtil::setFont({ui->label_6}, GUIUtil::FontWeight::Bold, 16);
+    GUIUtil::setFont({ui->label_6}, {GUIUtil::g_font_registry.GetWeightBold(), 16});
     GUIUtil::setFont({ui->label,
                       ui->label_2,
-                      ui->label_3}, GUIUtil::FontWeight::Normal, 15);
+                      ui->label_3}, {GUIUtil::g_font_registry.GetWeightNormal(), 15});
     GUIUtil::updateFonts();
 
     // context menu

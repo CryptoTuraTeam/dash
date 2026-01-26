@@ -40,23 +40,23 @@ except UnicodeDecodeError:
     CROSS = "x "
     CIRCLE = "o "
 
-if os.name != 'nt' or sys.getwindowsversion() >= (10, 0, 14393): #type:ignore
-    if os.name == 'nt':
-        import ctypes
-        kernel32 = ctypes.windll.kernel32  # type: ignore
-        ENABLE_VIRTUAL_TERMINAL_PROCESSING = 4
-        STD_OUTPUT_HANDLE = -11
-        STD_ERROR_HANDLE = -12
-        # Enable ascii color control to stdout
-        stdout = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
-        stdout_mode = ctypes.c_int32()
-        kernel32.GetConsoleMode(stdout, ctypes.byref(stdout_mode))
-        kernel32.SetConsoleMode(stdout, stdout_mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING)
-        # Enable ascii color control to stderr
-        stderr = kernel32.GetStdHandle(STD_ERROR_HANDLE)
-        stderr_mode = ctypes.c_int32()
-        kernel32.GetConsoleMode(stderr, ctypes.byref(stderr_mode))
-        kernel32.SetConsoleMode(stderr, stderr_mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING)
+if os.name == 'nt': #type:ignore
+    import ctypes
+    kernel32 = ctypes.windll.kernel32  # type: ignore
+    ENABLE_VIRTUAL_TERMINAL_PROCESSING = 4
+    STD_OUTPUT_HANDLE = -11
+    STD_ERROR_HANDLE = -12
+    # Enable ascii color control to stdout
+    stdout = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+    stdout_mode = ctypes.c_int32()
+    kernel32.GetConsoleMode(stdout, ctypes.byref(stdout_mode))
+    kernel32.SetConsoleMode(stdout, stdout_mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING)
+    # Enable ascii color control to stderr
+    stderr = kernel32.GetStdHandle(STD_ERROR_HANDLE)
+    stderr_mode = ctypes.c_int32()
+    kernel32.GetConsoleMode(stderr, ctypes.byref(stderr_mode))
+    kernel32.SetConsoleMode(stderr, stderr_mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING)
+else:
     # primitive formatting on supported
     # terminal via ANSI escape sequences:
     DEFAULT = ('\033[0m', '\033[0m')
@@ -126,6 +126,7 @@ BASE_SCRIPTS = [
     'feature_llmq_is_retroactive.py', # NOTE: needs dash_hash to pass
     'feature_llmq_chainlocks.py', # NOTE: needs dash_hash to pass
     'feature_llmq_simplepose.py', # NOTE: needs dash_hash to pass
+    'feature_llmq_simplepose.py --disable-spork23', # NOTE: needs dash_hash to pass
     'feature_dip3_deterministicmns.py --legacy-wallet', # NOTE: needs dash_hash to pass
     'feature_dip3_deterministicmns.py --descriptors', # NOTE: needs dash_hash to pass
     'feature_llmq_signing.py', # NOTE: needs dash_hash to pass
@@ -134,15 +135,20 @@ BASE_SCRIPTS = [
     'feature_llmq_evo.py', # NOTE: needs dash_hash to pass
     'feature_llmq_is_cl_conflicts.py', # NOTE: needs dash_hash to pass
     'feature_llmq_dkgerrors.py', # NOTE: needs dash_hash to pass
+    'feature_llmq_singlenode.py', # NOTE: needs dash_hash to pass
     'feature_dip4_coinbasemerkleroots.py', # NOTE: needs dash_hash to pass
     'feature_mnehf.py', # NOTE: needs dash_hash to pass
+    'feature_masternode_params.py', # NOTE: needs dash_hash to pass
     'feature_governance.py --legacy-wallet',
     'feature_governance.py --descriptors',
     'feature_governance_cl.py --legacy-wallet',
     'feature_governance_cl.py --descriptors',
     'rpc_verifyislock.py',
     'feature_notifications.py',
+    'rpc_signer.py',
+    'wallet_signer.py --descriptors',
     # vv Tests less than 60s vv
+    'p2p_platform_ban.py', # NOTE: needs dash_hash to pass
     'p2p_sendheaders.py', # NOTE: needs dash_hash to pass
     'p2p_sendheaders_compressed.py', # NOTE: needs dash_hash to pass
     'wallet_importmulti.py --legacy-wallet',
@@ -151,6 +157,7 @@ BASE_SCRIPTS = [
     'wallet_listreceivedby.py --legacy-wallet',
     'wallet_listreceivedby.py --descriptors',
     'wallet_abandonconflict.py --legacy-wallet',
+    'p2p_dns_seeds.py',
     'wallet_abandonconflict.py --descriptors',
     'feature_csv_activation.py',
     'feature_reindex.py',
@@ -163,7 +170,8 @@ BASE_SCRIPTS = [
     'interface_zmq_dash.py --legacy-wallet',
     'interface_zmq.py',
     'rpc_invalid_address_message.py',
-    'interface_bitcoin_cli.py',
+    'interface_bitcoin_cli.py --legacy-wallet',
+    'interface_bitcoin_cli.py --descriptors',
     'feature_bind_extra.py',
     'mempool_resurrect.py',
     'wallet_txn_doublespend.py --mineblock',
@@ -191,8 +199,11 @@ BASE_SCRIPTS = [
     'wallet_listtransactions.py --descriptors',
     'wallet_watchonly.py --legacy-wallet',
     'wallet_watchonly.py --usecli --legacy-wallet',
+    'wallet_conflicts.py --legacy-wallet',
+    'wallet_conflicts.py --descriptors',
     'interface_http.py',
     'interface_rpc.py',
+    'interface_usdt_coinselection.py',
     'interface_usdt_net.py',
     'interface_usdt_utxocache.py',
     'interface_usdt_validation.py',
@@ -201,10 +212,12 @@ BASE_SCRIPTS = [
     'rpc_users.py',
     'rpc_whitelist.py',
     'feature_proxy.py',
-    'rpc_signrawtransaction.py --legacy-wallet',
-    'rpc_signrawtransaction.py --descriptors',
+    'wallet_signrawtransactionwithwallet.py --legacy-wallet',
+    'wallet_signrawtransactionwithwallet.py --descriptors',
+    'rpc_signrawtransactionwithkey.py',
     'rpc_rawtransaction.py --legacy-wallet',
-    'rpc_rawtransaction.py --descriptors',
+    'wallet_transactiontime_rescan.py --descriptors',
+    'wallet_transactiontime_rescan.py --legacy-wallet',
     'p2p_addrv2_relay.py',
     'wallet_groups.py --legacy-wallet',
     'wallet_groups.py --descriptors',
@@ -212,6 +225,7 @@ BASE_SCRIPTS = [
     'p2p_compactblocks_hb.py --v2transport',
     'p2p_disconnect_ban.py --v1transport',
     'p2p_disconnect_ban.py --v2transport',
+    'feature_posix_fs_permissions.py',
     'feature_addressindex.py',
     'feature_timestampindex.py',
     'feature_spentindex.py',
@@ -219,8 +233,7 @@ BASE_SCRIPTS = [
     'rpc_blockchain.py --v1transport',
     'rpc_blockchain.py --v2transport',
     'rpc_deprecated.py',
-    'wallet_disable.py --legacy-wallet',
-    'wallet_disable.py --descriptors',
+    'wallet_disable.py',
     'wallet_change_address.py --legacy-wallet',
     'wallet_change_address.py --descriptors',
     'p2p_addr_relay.py',
@@ -229,10 +242,12 @@ BASE_SCRIPTS = [
     'p2p_addrfetch.py',
     'rpc_net.py --v1transport',
     'rpc_net.py --v2transport',
+    'rpc_netinfo.py',
     'wallet_keypool.py --legacy-wallet',
     'wallet_keypool_hd.py --legacy-wallet',
     'wallet_keypool_hd.py --descriptors',
     'wallet_descriptor.py --descriptors',
+    'feature_maxtipage.py',
     'p2p_nobloomfilter_messages.py',
     'p2p_filter.py',
     'p2p_blocksonly.py',
@@ -263,8 +278,7 @@ BASE_SCRIPTS = [
     'feature_utxo_set_hash.py',
     'mempool_packages.py',
     'mempool_package_onemore.py',
-    'rpc_createmultisig.py --legacy-wallet',
-    'rpc_createmultisig.py --descriptors',
+    'rpc_createmultisig.py',
     'rpc_packages.py',
     'mempool_package_limits.py',
     'feature_versionbits_warning.py',
@@ -278,14 +292,13 @@ BASE_SCRIPTS = [
     'p2p_ibd_stalling.py --v2transport',
     'p2p_net_deadlock.py --v1transport',
     'p2p_net_deadlock.py --v2transport',
-    'rpc_signmessage.py',
-    'rpc_generateblock.py',
+    'wallet_signmessagewithaddress.py',
+    'rpc_signmessagewithprivkey.py',
     'rpc_generate.py',
     'wallet_balance.py --legacy-wallet',
     'wallet_balance.py --descriptors',
     'p2p_initial_headers_sync.py',
-    'feature_nulldummy.py --legacy-wallet',
-    'feature_nulldummy.py --descriptors',
+    'feature_nulldummy.py',
     'mempool_accept.py',
     'mempool_expiry.py',
     'wallet_import_rescan.py --legacy-wallet',
@@ -293,13 +306,17 @@ BASE_SCRIPTS = [
     'wallet_upgradewallet.py --legacy-wallet',
     'wallet_importdescriptors.py --descriptors',
     'wallet_mnemonicbits.py --legacy-wallet',
-    # 'wallet_mnemonicbits.py --descriptors', # TODO : implement mnemonics for descriptor wallets
+    'wallet_mnemonicbits.py --descriptors',
     'rpc_bind.py --ipv4',
     'rpc_bind.py --ipv6',
     'rpc_bind.py --nonloopback',
+    'wallet_crosschain.py',
     'mining_basic.py',
     'rpc_named_arguments.py',
     'feature_startupnotify.py',
+    'feature_stats.py',
+    'wallet_simulaterawtx.py --legacy-wallet',
+    'wallet_simulaterawtx.py --descriptors',
     'wallet_listsinceblock.py --legacy-wallet',
     'wallet_listsinceblock.py --descriptors',
     'wallet_listdescriptors.py --descriptors',
@@ -313,6 +330,7 @@ BASE_SCRIPTS = [
     'wallet_encryption.py --legacy-wallet',
     'wallet_encryption.py --descriptors',
     'wallet_upgradetohd.py --legacy-wallet',
+    'wallet_upgradetohd.py --descriptors',
     'feature_dersig.py',
     'feature_cltv.py',
     'feature_new_quorum_type_activation.py',
@@ -339,7 +357,6 @@ BASE_SCRIPTS = [
     'wallet_send.py --descriptors',
     'wallet_create_tx.py --descriptors',
     'p2p_fingerprint.py',
-    'rpc_deprecated_platform_filter.py',
     'rpc_external_queue.py',
     'rpc_wipewallettxes.py',
     'feature_uacomment.py',
@@ -363,11 +380,13 @@ BASE_SCRIPTS = [
     'p2p_ping.py',
     'p2p_sendtxrcncl.py',
     'rpc_scantxoutset.py',
-    'feature_txindex_compatibility.py',
+    'feature_unsupported_utxo_db.py',
     'feature_logging.py',
     'feature_anchors.py',
+    'mempool_datacarrier.py',
     'feature_coinstatsindex.py',
     'wallet_orphanedreward.py',
+    'wallet_timelock.py',
     'p2p_node_network_limited.py --v1transport',
     'p2p_node_network_limited.py --v2transport',
     'p2p_permissions.py',
@@ -378,9 +397,9 @@ BASE_SCRIPTS = [
     'feature_config_args.py',
     'feature_settings.py',
     'rpc_getdescriptorinfo.py',
-    'rpc_addresses_deprecation.py',
     'rpc_getpeerinfo_deprecation.py',
     'rpc_mempool_entry_fee_fields_deprecation.py',
+    'rpc_mempool_info.py',
     'rpc_help.py',
     'feature_dirsymlinks.py',
     'feature_help.py',
@@ -420,6 +439,8 @@ def main():
     parser.add_argument('--tmpdirprefix', '-t', default=tempfile.gettempdir(), help="Root directory for datadirs")
     parser.add_argument('--failfast', '-F', action='store_true', help='stop execution after the first test failure')
     parser.add_argument('--filter', help='filter scripts to run by regular expression')
+    parser.add_argument('--skipunit', '-u', action='store_true', help='skip unit tests for the test framework')
+
 
     args, unknown_args = parser.parse_known_args()
     if not args.ansi:
@@ -531,9 +552,10 @@ def main():
         combined_logs_len=args.combinedlogslen,
         failfast=args.failfast,
         use_term_control=args.ansi,
+        skipunit=args.skipunit,
     )
 
-def run_tests(*, test_list, src_dir, build_dir, tmpdir, jobs=1, attempts=1, enable_coverage=False, args=None, combined_logs_len=0,failfast=False, use_term_control):
+def run_tests(*, test_list, src_dir, build_dir, tmpdir, jobs=1, attempts=1, enable_coverage=False, args=None, combined_logs_len=0, failfast=False, use_term_control, skipunit=False):
     args = args or []
 
     # Warn if dashd is already running
@@ -550,20 +572,20 @@ def run_tests(*, test_list, src_dir, build_dir, tmpdir, jobs=1, attempts=1, enab
     if os.path.isdir(cache_dir):
         print("%sWARNING!%s There is a cache directory here: %s. If tests fail unexpectedly, try deleting the cache directory." % (BOLD[1], BOLD[0], cache_dir))
 
-    # Test Framework Tests
-    print("Running Unit Tests for Test Framework Modules")
 
     tests_dir = src_dir + '/test/functional/'
     # This allows `test_runner.py` to work from an out-of-source build directory using a symlink,
     # a hard link or a copy on any platform. See https://github.com/bitcoin/bitcoin/pull/27561.
     sys.path.append(tests_dir)
 
-    test_framework_tests = unittest.TestSuite()
-    for module in TEST_FRAMEWORK_MODULES:
-        test_framework_tests.addTest(unittest.TestLoader().loadTestsFromName("test_framework.{}".format(module)))
-    result = unittest.TextTestRunner(verbosity=1, failfast=True).run(test_framework_tests)
-    if not result.wasSuccessful():
-        sys.exit("Early exiting after failure in TestFramework unit tests")
+    if not skipunit:
+        print("Running Unit Tests for Test Framework Modules")
+        test_framework_tests = unittest.TestSuite()
+        for module in TEST_FRAMEWORK_MODULES:
+            test_framework_tests.addTest(unittest.TestLoader().loadTestsFromName("test_framework.{}".format(module)))
+        result = unittest.TextTestRunner(verbosity=1, failfast=True).run(test_framework_tests)
+        if not result.wasSuccessful():
+            sys.exit("Early exiting after failure in TestFramework unit tests")
 
     flags = ['--cachedir={}'.format(cache_dir)] + args
 
@@ -601,13 +623,13 @@ def run_tests(*, test_list, src_dir, build_dir, tmpdir, jobs=1, attempts=1, enab
     while not job_queue.done():
         if failfast and not all_passed:
             break
-        for test_result, testdir, stdout, stderr in job_queue.get_next():
+        for test_result, testdir, stdout, stderr, skip_reason in job_queue.get_next():
             test_results.append(test_result)
             done_str = f"{len(test_results)}/{test_count} - {BOLD[1]}{test_result.name}{BOLD[0]}"
             if test_result.status == "Passed":
                 logging.debug("%s passed, Duration: %s s" % (done_str, test_result.time))
             elif test_result.status == "Skipped":
-                logging.debug("%s skipped" % (done_str))
+                logging.debug(f"{done_str} skipped ({skip_reason})")
             else:
                 all_passed = False
                 print("%s failed, Duration: %s s\n" % (done_str, test_result.time))
@@ -622,7 +644,7 @@ def run_tests(*, test_list, src_dir, build_dir, tmpdir, jobs=1, attempts=1, enab
                     combined_logs_args = [sys.executable, os.path.join(tests_dir, 'combine_logs.py'), testdir]
                     if BOLD[0]:
                         combined_logs_args += ['--color']
-                    combined_logs, _ = subprocess.Popen(combined_logs_args, universal_newlines=True, stdout=subprocess.PIPE).communicate()
+                    combined_logs, _ = subprocess.Popen(combined_logs_args, text=True, stdout=subprocess.PIPE).communicate()
                     print("\n".join(deque(combined_logs.splitlines(), combined_logs_len)))
 
                 if failfast:
@@ -709,7 +731,7 @@ class TestHandler:
             self.jobs.append((test,
                               time.time(),
                               subprocess.Popen([sys.executable, self.tests_dir + test_argv[0]] + test_argv[1:] + self.flags + portseed_arg + tmpdir_arg,
-                                               universal_newlines=True,
+                                               text=True,
                                                stdout=log_stdout,
                                                stderr=log_stderr),
                               testdir,
@@ -735,10 +757,12 @@ class TestHandler:
                     log_out.seek(0), log_err.seek(0)
                     [stdout, stderr] = [log_file.read().decode('utf-8') for log_file in (log_out, log_err)]
                     log_out.close(), log_err.close()
+                    skip_reason = None
                     if proc.returncode == TEST_EXIT_PASSED and stderr == "":
                         status = "Passed"
                     elif proc.returncode == TEST_EXIT_SKIPPED:
                         status = "Skipped"
+                        skip_reason = re.search(r"Test Skipped: (.*)", stdout).group(1)
                     elif attempt < self.attempts:
                         # cleanup
                         if self.use_term_control:
@@ -774,7 +798,7 @@ class TestHandler:
                         clearline = '\r' + (' ' * dot_count) + '\r'
                         print(clearline, end='', flush=True)
                     dot_count = 0
-                    ret.append((TestResult(name, status, int(time.time() - start_time)), testdir, stdout, stderr))
+                    ret.append((TestResult(name, status, int(time.time() - start_time)), testdir, stdout, stderr, skip_reason))
             if ret:
                 return ret
             if self.use_term_control:
@@ -898,8 +922,6 @@ class RPCCoverage():
         covered_cmds.add('voteraw')
         # TODO: implement functional tests for getmerkleblocks
         covered_cmds.add('getmerkleblocks')
-        # TODO: drop it with v23+: remove `debug` in favour of `logging`
-        covered_cmds.add('debug')
 
         if not os.path.isfile(coverage_ref_filename):
             raise RuntimeError("No coverage reference found")

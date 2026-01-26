@@ -8,6 +8,7 @@ Test that the CHECKLOCKTIMEVERIFY soft-fork activates.
 """
 
 from test_framework.blocktools import (
+    TIME_GENESIS_BLOCK,
     create_block,
     create_coinbase,
 )
@@ -64,7 +65,7 @@ def cltv_invalidate(tx, failure_reason):
         # +-------------------------------------------------+------------+--------------+
         [[OP_CHECKLOCKTIMEVERIFY],                            None,       None],
         [[OP_1NEGATE, OP_CHECKLOCKTIMEVERIFY, OP_DROP],       None,       None],
-        [[CScriptNum(100), OP_CHECKLOCKTIMEVERIFY, OP_DROP],  0,          1296688602],  # timestamp of genesis block
+        [[CScriptNum(100), OP_CHECKLOCKTIMEVERIFY, OP_DROP],  0,          TIME_GENESIS_BLOCK],
         [[CScriptNum(100), OP_CHECKLOCKTIMEVERIFY, OP_DROP],  0,          50],
         [[CScriptNum(50),  OP_CHECKLOCKTIMEVERIFY, OP_DROP],  SEQUENCE_FINAL, 50],
     ][failure_reason]
@@ -88,10 +89,11 @@ class BIP65Test(BitcoinTestFramework):
         self.extra_args = [[
             f'-testactivationheight=cltv@{CLTV_HEIGHT}',
             '-whitelist=noban@127.0.0.1',
-            '-dip3params=9000:9000',
-            '-testactivationheight=v20@9000', # disabled for this test
             '-par=1',  # Use only one script thread to get the exact reject reason for testing
             '-acceptnonstdtxn=1',  # cltv_invalidate is nonstandard
+            '-dip3params=9000:9000',
+            '-testactivationheight=v20@9000', # disabled for this test
+            '-testactivationheight=mn_rr@9000', # disabled for this test
         ]]
         self.setup_clean_chain = True
         self.rpc_timeout = 480
@@ -126,10 +128,7 @@ class BIP65Test(BitcoinTestFramework):
 
         tip = self.nodes[0].getbestblockhash()
         block_time = self.nodes[0].getblockheader(tip)['mediantime'] + 1
-        block = create_block(int(tip, 16), create_coinbase(CLTV_HEIGHT - 1), block_time)
-        block.nVersion = 3
-        block.vtx.extend(invalid_cltv_txs)
-        block.hashMerkleRoot = block.calc_merkle_root()
+        block = create_block(int(tip, 16), create_coinbase(CLTV_HEIGHT - 1), block_time, version=3, txlist=invalid_cltv_txs)
         block.solve()
 
         self.test_cltv_info(is_active=False)  # Not active as of current tip and next block does not need to obey rules
@@ -140,8 +139,7 @@ class BIP65Test(BitcoinTestFramework):
         self.log.info("Test that blocks must now be at least version 4")
         tip = block.sha256
         block_time += 1
-        block = create_block(tip, create_coinbase(CLTV_HEIGHT), block_time)
-        block.nVersion = 3
+        block = create_block(tip, create_coinbase(CLTV_HEIGHT), block_time, version=3)
         block.solve()
 
         with self.nodes[0].assert_debug_log(expected_msgs=[f'{block.hash}, bad-version(0x00000003)']):

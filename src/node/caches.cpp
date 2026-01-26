@@ -4,13 +4,14 @@
 
 #include <node/caches.h>
 
+#include <index/txindex.h>
 #include <txdb.h>
 #include <util/system.h>
-#include <validation.h>
 
+namespace node {
 CacheSizes CalculateCacheSizes(const ArgsManager& args, size_t n_indexes)
 {
-    int64_t nTotalCache = (args.GetArg("-dbcache", nDefaultDbCache) << 20);
+    int64_t nTotalCache = (args.GetIntArg("-dbcache", nDefaultDbCache) << 20);
     nTotalCache = std::max(nTotalCache, nMinDbCache << 20); // total cache cannot be less than nMinDbCache
     nTotalCache = std::min(nTotalCache, nMaxDbCache << 20); // total cache cannot be greater than nMaxDbcache
     CacheSizes sizes;
@@ -30,3 +31,4 @@ CacheSizes CalculateCacheSizes(const ArgsManager& args, size_t n_indexes)
     sizes.coins = nTotalCache; // the rest goes to in-memory cache
     return sizes;
 }
+} // namespace node

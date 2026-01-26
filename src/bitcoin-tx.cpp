@@ -1,4 +1,4 @@
-// Copyright (c) 2009-2020 The Bitcoin Core developers
+// Copyright (c) 2009-2021 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -26,10 +26,10 @@
 #include <util/system.h>
 #include <util/translation.h>
 
+#include <cstdio>
 #include <functional>
 #include <memory>
 #include <optional>
-#include <stdio.h>
 
 #include <stacktraces.h>
 
@@ -78,9 +78,6 @@ static void SetupBitcoinTxArgs(ArgsManager &argsman)
 //
 static int AppInitRawTx(int argc, char* argv[])
 {
-    //
-    // Parameters
-    //
     SetupBitcoinTxArgs(gArgs);
     std::string error;
     if (!gArgs.ParseParameters(argc, argv, error)) {
@@ -93,7 +90,7 @@ static int AppInitRawTx(int argc, char* argv[])
         return true;
     }
 
-    // Check for -chain, -testnet or -regtest parameter (Params() calls are only valid after this clause)
+    // Check for chain settings (Params() calls are only valid after this clause)
     try {
         SelectParams(gArgs.GetChainName());
     } catch (const std::exception& e) {
@@ -106,7 +103,10 @@ static int AppInitRawTx(int argc, char* argv[])
     if (argc < 2 || HelpRequested(gArgs) || gArgs.IsArgSet("-version")) {
         // First part of help message is specific to this utility
         std::string strUsage = PACKAGE_NAME " dash-tx utility version " + FormatFullVersion() + "\n";
-        if (!gArgs.IsArgSet("-version")) {
+
+        if (gArgs.IsArgSet("-version")) {
+            strUsage += FormatParagraph(LicenseInfo());
+        } else {
             strUsage += "\n"
                 "Usage:  dash-tx [options] <hex-tx> [commands]  Update hex-encoded dash transaction\n"
                 "or:     dash-tx [options] -create [commands]   Create hex-encoded dash transaction\n"
@@ -276,7 +276,7 @@ static void MutateTxAddOutAddr(CMutableTransaction& tx, const std::string& strIn
     CAmount value = ExtractAndValidateValue(vStrInputParts[0]);
 
     // extract and validate ADDRESS
-    std::string strAddr = vStrInputParts[1];
+    const std::string& strAddr = vStrInputParts[1];
     CTxDestination destination = DecodeDestination(strAddr);
     if (!IsValidDestination(destination)) {
         throw std::runtime_error("invalid TX output address");
@@ -308,7 +308,7 @@ static void MutateTxAddOutPubKey(CMutableTransaction& tx, const std::string& str
     // Extract and validate FLAGS
     bool bScriptHash = false;
     if (vStrInputParts.size() == 3) {
-        std::string flags = vStrInputParts[2];
+        const std::string& flags = vStrInputParts[2];
         bScriptHash = (flags.find('S') != std::string::npos);
     }
 
@@ -360,7 +360,7 @@ static void MutateTxAddOutMultiSig(CMutableTransaction& tx, const std::string& s
     // Extract FLAGS
     bool bScriptHash = false;
     if (vStrInputParts.size() == numkeys + 4) {
-        std::string flags = vStrInputParts.back();
+        const std::string& flags = vStrInputParts.back();
         bScriptHash = (flags.find('S') != std::string::npos);
     }
     else if (vStrInputParts.size() > numkeys + 4) {
@@ -425,13 +425,13 @@ static void MutateTxAddOutScript(CMutableTransaction& tx, const std::string& str
     CAmount value = ExtractAndValidateValue(vStrInputParts[0]);
 
     // extract and validate script
-    std::string strScript = vStrInputParts[1];
+    const std::string& strScript = vStrInputParts[1];
     CScript scriptPubKey = ParseScript(strScript);
 
     // Extract FLAGS
     bool bScriptHash = false;
     if (vStrInputParts.size() == 3) {
-        std::string flags = vStrInputParts.back();
+        const std::string& flags = vStrInputParts.back();
         bScriptHash = (flags.find('S') != std::string::npos);
     }
 
@@ -552,7 +552,7 @@ static void MutateTxSign(CMutableTransaction& tx, const std::string& flagStr)
     UniValue prevtxsObj = registers["prevtxs"];
     {
         for (unsigned int previdx = 0; previdx < prevtxsObj.size(); previdx++) {
-            UniValue prevOut = prevtxsObj[previdx];
+            const UniValue& prevOut = prevtxsObj[previdx];
             if (!prevOut.isObject())
                 throw std::runtime_error("expected prevtxs internal object");
 
@@ -569,7 +569,7 @@ static void MutateTxSign(CMutableTransaction& tx, const std::string& flagStr)
                 throw std::runtime_error("txid must be hexadecimal string (not '" + prevOut["txid"].get_str() + "')");
             }
 
-            const int nOut = prevOut["vout"].get_int();
+            const int nOut = prevOut["vout"].getInt<int>();
             if (nOut < 0)
                 throw std::runtime_error("vout cannot be negative");
 
@@ -587,7 +587,7 @@ static void MutateTxSign(CMutableTransaction& tx, const std::string& flagStr)
                 }
                 Coin newcoin;
                 newcoin.out.scriptPubKey = scriptPubKey;
-                newcoin.out.nValue = 0; // we don't know the actual output value
+                newcoin.out.nValue = MAX_MONEY;
                 if (prevOut.exists("amount")) {
                     newcoin.out.nValue = AmountFromValue(prevOut["amount"]);
                 }
@@ -624,7 +624,7 @@ static void MutateTxSign(CMutableTransaction& tx, const std::string& flagStr)
         SignatureData sigdata = DataFromTransaction(mergedTx, i, coin.out);
         // Only sign SIGHASH_SINGLE if there's a corresponding output:
         if (!fHashSingle || (i < mergedTx.vout.size()))
-            ProduceSignature(keystore, MutableTransactionSignatureCreator(&mergedTx, i, amount, nHashType), prevPubKey, sigdata);
+            ProduceSignature(keystore, MutableTransactionSignatureCreator(mergedTx, i, amount, nHashType), prevPubKey, sigdata);
 
         UpdateInput(txin, sigdata);
     }
@@ -691,7 +691,7 @@ static void MutateTx(CMutableTransaction& tx, const std::string& command,
 static void OutputTxJSON(const CTransaction& tx)
 {
     UniValue entry(UniValue::VOBJ);
-    TxToUniv(tx, uint256(), /* include_addresses */ false, entry);
+    TxToUniv(tx, /*block_hash=*/uint256(), entry);
 
     std::string jsonOutput = entry.write(4);
     tfm::format(std::cout, "%s\n", jsonOutput);

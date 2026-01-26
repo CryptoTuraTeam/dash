@@ -1,5 +1,5 @@
-// Copyright (c) 2011-2020 The Bitcoin Core developers
-// Copyright (c) 2014-2024 The Dash Core developers
+// Copyright (c) 2011-2021 The Bitcoin Core developers
+// Copyright (c) 2014-2025 The Dash Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -24,16 +24,14 @@
 #include <cstdlib>
 #include <memory>
 
-#include <QApplication>
 #include <QByteArray>
 #include <QDataStream>
-#include <QDebug>
 #include <QFile>
 #include <QFileOpenEvent>
 #include <QHash>
-#include <QList>
 #include <QLocalServer>
 #include <QLocalSocket>
+#include <QMessageBox>
 #include <QStringList>
 #include <QUrlQuery>
 
@@ -127,11 +125,8 @@ bool PaymentServer::ipcSendCommandLine()
     return fResult;
 }
 
-PaymentServer::PaymentServer(QObject* parent, bool startLocalServer) :
-    QObject(parent),
-    saveURIs(true),
-    uriServer(nullptr),
-    optionsModel(nullptr)
+PaymentServer::PaymentServer(QObject* parent, bool startLocalServer)
+    : QObject(parent)
 {
     // Install global event filter to catch QFileOpenEvents
     // on Mac: sent when you click dash: links
@@ -159,9 +154,7 @@ PaymentServer::PaymentServer(QObject* parent, bool startLocalServer) :
     }
 }
 
-PaymentServer::~PaymentServer()
-{
-}
+PaymentServer::~PaymentServer() = default;
 
 //
 // OSX-specific way of handling dash: URIs

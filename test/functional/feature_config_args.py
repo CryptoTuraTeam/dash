@@ -17,13 +17,28 @@ class ConfArgsTest(BitcoinTestFramework):
         self.num_nodes = 1
         self.supports_cli = False
         self.wallet_names = []
+        self.disable_autoconnect = False
 
     def test_config_file_parser(self):
+        self.log.info('Test config file parser')
         self.stop_node(0)
 
+        # Check that startup fails if conf= is set in bitcoin.conf or in an included conf file
+        bad_conf_file_path = os.path.join(self.options.tmpdir, 'node0', 'bitcoin_bad.conf')
+        util.write_config(bad_conf_file_path, n=0, chain='', extra_config=f'conf=some.conf\n')
+        conf_in_config_file_err = 'Error: Error reading configuration file: conf cannot be set in the configuration file; use includeconf= if you want to include additional config files'
+        self.nodes[0].assert_start_raises_init_error(
+            extra_args=[f'-conf={bad_conf_file_path}'],
+            expected_msg=conf_in_config_file_err,
+        )
         inc_conf_file_path = os.path.join(self.nodes[0].datadir, 'include.conf')
         with open(os.path.join(self.nodes[0].datadir, 'dash.conf'), 'a', encoding='utf-8') as conf:
             conf.write(f'includeconf={inc_conf_file_path}\n')
+        with open(inc_conf_file_path, 'w', encoding='utf-8') as conf:
+            conf.write('conf=some.conf\n')
+        self.nodes[0].assert_start_raises_init_error(
+            expected_msg=conf_in_config_file_err,
+        )
 
         self.nodes[0].assert_start_raises_init_error(
             expected_msg='Error: Error parsing command line arguments: Invalid parameter -dash_cli=1',
@@ -31,7 +46,15 @@ class ConfArgsTest(BitcoinTestFramework):
         )
         with open(inc_conf_file_path, 'w', encoding='utf-8') as conf:
             conf.write('dash_conf=1\n')
+
         with self.nodes[0].assert_debug_log(expected_msgs=['Ignoring unknown configuration value dash_conf']):
+            self.start_node(0)
+        self.stop_node(0)
+
+        with open(inc_conf_file_path, 'w', encoding='utf-8') as conf:
+            conf.write('reindex=1\n')
+
+        with self.nodes[0].assert_debug_log(expected_msgs=['Warning: reindex=1 is set in the configuration file, which will significantly slow down startup. Consider removing or commenting out this option for better performance, unless there is currently a condition which makes rebuilding the indexes necessary']):
             self.start_node(0)
         self.stop_node(0)
 
@@ -100,7 +123,6 @@ class ConfArgsTest(BitcoinTestFramework):
                 expected_msgs=[
                     'Command-line arg: addnode="some.node"',
                     'Command-line arg: rpcauth=****',
-                    'Command-line arg: rpcbind=****',
                     'Command-line arg: rpcpassword=****',
                     'Command-line arg: rpcuser=****',
                     'Command-line arg: torpassword=****',
@@ -109,14 +131,17 @@ class ConfArgsTest(BitcoinTestFramework):
                 ],
                 unexpected_msgs=[
                     'alice:f7efda5c189b999524f151318c0c86$d5b51b3beffbc0',
-                    '127.1.1.1',
                     'secret-rpcuser',
                     'secret-torpassword',
+                    'Command-line arg: rpcbind=****',
+                    'Command-line arg: rpcallowip=****',
                 ]):
             self.start_node(0, extra_args=[
                 '-addnode=some.node',
                 '-rpcauth=alice:f7efda5c189b999524f151318c0c86$d5b51b3beffbc0',
                 '-rpcbind=127.1.1.1',
+                '-rpcbind=127.0.0.1',
+                "-rpcallowip=127.0.0.1",
                 '-rpcpassword=',
                 '-rpcuser=secret-rpcuser',
                 '-torpassword=secret-torpassword',
@@ -158,15 +183,19 @@ class ConfArgsTest(BitcoinTestFramework):
         self.stop_node(0)
 
         # No peers.dat exists and -dnsseed=1
-        # We expect the node will use DNS Seeds, but Regtest mode has 0 DNS seeds
-        # So after 60 seconds, the node should fallback to fixed seeds (this is a slow test)
+        # We expect the node will use DNS Seeds, but Regtest mode does not have
+        # any valid DNS seeds. So after 60 seconds, the node should fallback to
+        # fixed seeds
         assert not os.path.exists(os.path.join(default_data_dir, "peers.dat"))
         start = int(time.time())
-        with self.nodes[0].assert_debug_log(expected_msgs=[
-                "Loaded 0 addresses from peers.dat",
-                "0 addresses found from DNS seeds",
-                "opencon thread start",  # Ensure ThreadOpenConnections::start time is properly set
-        ]):
+        with self.nodes[0].assert_debug_log(
+                expected_msgs=[
+                    "Loaded 0 addresses from peers.dat",
+                    "0 addresses found from DNS seeds",
+                    "opencon thread start",  # Ensure ThreadOpenConnections::start time is properly set
+                ],
+                timeout=10,
+        ):
             self.start_node(0, extra_args=['-dnsseed=1', '-fixedseeds=1', f'-mocktime={start}'])
         with self.nodes[0].assert_debug_log(expected_msgs=[
                 "Adding fixed seeds as 60 seconds have passed and addrman is empty",
@@ -201,11 +230,14 @@ class ConfArgsTest(BitcoinTestFramework):
         # We expect the node will allow 60 seconds prior to using fixed seeds
         assert not os.path.exists(os.path.join(default_data_dir, "peers.dat"))
         start = int(time.time())
-        with self.nodes[0].assert_debug_log(expected_msgs=[
-                "Loaded 0 addresses from peers.dat",
-                "DNS seeding disabled",
-                "opencon thread start",  # Ensure ThreadOpenConnections::start time is properly set
-        ]):
+        with self.nodes[0].assert_debug_log(
+                expected_msgs=[
+                    "Loaded 0 addresses from peers.dat",
+                    "DNS seeding disabled",
+                    "opencon thread start",  # Ensure ThreadOpenConnections::start time is properly set
+                ],
+                timeout=10,
+        ):
             self.start_node(0, extra_args=['-dnsseed=0', '-fixedseeds=1', '-addnode=fakenodeaddr', f'-mocktime={start}'])
         with self.nodes[0].assert_debug_log(expected_msgs=[
                 "Adding fixed seeds as 60 seconds have passed and addrman is empty",
@@ -269,7 +301,8 @@ class ConfArgsTest(BitcoinTestFramework):
         conf_file = os.path.join(default_data_dir, "dash.conf")
 
         # datadir needs to be set before [chain] section
-        conf_file_contents = open(conf_file, encoding='utf8').read()
+        with open(conf_file, encoding='utf8') as f:
+            conf_file_contents = f.read()
         with open(conf_file, 'w', encoding='utf8') as f:
             f.write(f"datadir={new_data_dir}\n")
             f.write(conf_file_contents)

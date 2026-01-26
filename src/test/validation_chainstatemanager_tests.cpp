@@ -1,18 +1,14 @@
-// Copyright (c) 2019-2020 The Bitcoin Core developers
+// Copyright (c) 2019-2021 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 //
 #include <chainparams.h>
 #include <consensus/validation.h>
-#include <evo/evodb.h>
 #include <index/txindex.h>
-#include <llmq/blockprocessor.h>
-#include <llmq/context.h>
 #include <node/chainstate.h>
 #include <node/utxo_snapshot.h>
 #include <random.h>
 #include <rpc/blockchain.h>
-#include <spork.h>
 #include <sync.h>
 #include <test/util/chainstate.h>
 #include <test/util/setup_common.h>
@@ -20,11 +16,19 @@
 #include <validation.h>
 #include <validationinterface.h>
 
+#include <evo/evodb.h>
+#include <llmq/blockprocessor.h>
+#include <llmq/context.h>
+#include <llmq/signing.h>
+#include <spork.h>
+
 #include <tinyformat.h>
 
 #include <vector>
 
 #include <boost/test/unit_test.hpp>
+
+using node::SnapshotMetadata;
 
 BOOST_FIXTURE_TEST_SUITE(validation_chainstatemanager_tests, ChainTestingSetup)
 
@@ -46,11 +50,10 @@ BOOST_AUTO_TEST_CASE(chainstatemanager)
     CChainState& c1 = WITH_LOCK(::cs_main, return manager.InitializeChainstate(&mempool, evodb, m_node.chain_helper));
     chainstates.push_back(&c1);
     c1.InitCoinsDB(
-        /* cache_size_bytes */ 1 << 23, /* in_memory */ true, /* should_wipe */ false);
+        /*cache_size_bytes=*/1 << 23, /*in_memory=*/true, /*should_wipe=*/false);
     WITH_LOCK(::cs_main, c1.InitCoinsCache(1 << 23));
 
-    DashChainstateSetup(manager, m_node, /*fReset=*/false, /*fReindexChainState=*/false, consensus_params);
-    DashPostChainstateSetup(m_node);
+    DashChainstateSetup(manager, m_node, /*llmq_dbs_in_memory=*/true, /*llmq_dbs_wipe=*/false, consensus_params);
 
     BOOST_CHECK(!manager.IsSnapshotActive());
     BOOST_CHECK(WITH_LOCK(::cs_main, return !manager.IsSnapshotValidated()));
@@ -68,9 +71,7 @@ BOOST_AUTO_TEST_CASE(chainstatemanager)
 
     BOOST_CHECK(!manager.SnapshotBlockhash().has_value());
 
-    DashPostChainstateSetupClose(m_node);
     if (m_node.llmq_ctx) {
-        m_node.llmq_ctx->Interrupt();
         m_node.llmq_ctx->Stop();
     }
     DashChainstateSetupClose(m_node);
@@ -84,13 +85,12 @@ BOOST_AUTO_TEST_CASE(chainstatemanager)
     );
     chainstates.push_back(&c2);
 
-    DashChainstateSetup(manager, m_node, /*fReset=*/false, /*fReindexChainState=*/false, consensus_params);
-    DashPostChainstateSetup(m_node);
+    DashChainstateSetup(manager, m_node, /*llmq_dbs_in_memory=*/true, /*llmq_dbs_wipe=*/false, consensus_params);
 
     BOOST_CHECK_EQUAL(manager.SnapshotBlockhash().value(), snapshot_blockhash);
 
     c2.InitCoinsDB(
-        /* cache_size_bytes */ 1 << 23, /* in_memory */ true, /* should_wipe */ false);
+        /*cache_size_bytes=*/1 << 23, /*in_memory=*/true, /*should_wipe=*/false);
     WITH_LOCK(::cs_main, c2.InitCoinsCache(1 << 23));
     // Unlike c1, which doesn't have any blocks. Gets us different tip, height.
     c2.LoadGenesisBlock();
@@ -120,9 +120,7 @@ BOOST_AUTO_TEST_CASE(chainstatemanager)
     // Let scheduler events finish running to avoid accessing memory that is going to be unloaded
     SyncWithValidationInterfaceQueue();
 
-    DashPostChainstateSetupClose(m_node);
     if (m_node.llmq_ctx) {
-        m_node.llmq_ctx->Interrupt();
         m_node.llmq_ctx->Stop();
     }
     DashChainstateSetupClose(m_node);
@@ -145,7 +143,7 @@ BOOST_AUTO_TEST_CASE(chainstatemanager_rebalance_caches)
     CChainState& c1 = WITH_LOCK(cs_main, return manager.InitializeChainstate(&mempool, evodb, m_node.chain_helper));
     chainstates.push_back(&c1);
     c1.InitCoinsDB(
-        /* cache_size_bytes */ 1 << 23, /* in_memory */ true, /* should_wipe */ false);
+        /*cache_size_bytes=*/1 << 23, /*in_memory=*/true, /*should_wipe=*/false);
 
     {
         LOCK(::cs_main);
@@ -163,7 +161,7 @@ BOOST_AUTO_TEST_CASE(chainstatemanager_rebalance_caches)
     CChainState& c2 = WITH_LOCK(cs_main, return manager.InitializeChainstate(&mempool, evodb, m_node.chain_helper, GetRandHash()));
     chainstates.push_back(&c2);
     c2.InitCoinsDB(
-        /* cache_size_bytes */ 1 << 23, /* in_memory */ true, /* should_wipe */ false);
+        /*cache_size_bytes=*/1 << 23, /*in_memory=*/true, /*should_wipe=*/false);
 
     {
         LOCK(::cs_main);
@@ -220,7 +218,7 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_activate_snapshot, TestChain100Setup)
 
     // Should not load malleated snapshots
     BOOST_REQUIRE(!CreateAndActivateUTXOSnapshot(
-        m_node, m_path_root, [](CAutoFile& auto_infile, SnapshotMetadata& metadata) {
+        m_node, m_path_root, [](AutoFile& auto_infile, SnapshotMetadata& metadata) {
             // A UTXO is missing but count is correct
             metadata.m_coins_count -= 1;
 
@@ -231,22 +229,22 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_activate_snapshot, TestChain100Setup)
             auto_infile >> coin;
     }));
     BOOST_REQUIRE(!CreateAndActivateUTXOSnapshot(
-        m_node, m_path_root, [](CAutoFile& auto_infile, SnapshotMetadata& metadata) {
+        m_node, m_path_root, [](AutoFile& auto_infile, SnapshotMetadata& metadata) {
             // Coins count is larger than coins in file
             metadata.m_coins_count += 1;
     }));
     BOOST_REQUIRE(!CreateAndActivateUTXOSnapshot(
-        m_node, m_path_root, [](CAutoFile& auto_infile, SnapshotMetadata& metadata) {
+        m_node, m_path_root, [](AutoFile& auto_infile, SnapshotMetadata& metadata) {
             // Coins count is smaller than coins in file
             metadata.m_coins_count -= 1;
     }));
     BOOST_REQUIRE(!CreateAndActivateUTXOSnapshot(
-        m_node, m_path_root, [](CAutoFile& auto_infile, SnapshotMetadata& metadata) {
+        m_node, m_path_root, [](AutoFile& auto_infile, SnapshotMetadata& metadata) {
             // Wrong hash
             metadata.m_base_blockhash = uint256::ZERO;
     }));
     BOOST_REQUIRE(!CreateAndActivateUTXOSnapshot(
-        m_node, m_path_root, [](CAutoFile& auto_infile, SnapshotMetadata& metadata) {
+        m_node, m_path_root, [](AutoFile& auto_infile, SnapshotMetadata& metadata) {
             // Wrong hash
             metadata.m_base_blockhash = uint256::ONE;
     }));
@@ -341,7 +339,7 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_activate_snapshot, TestChain100Setup)
 
 //! Test LoadBlockIndex behavior when multiple chainstates are in use.
 //!
-//! - First, verfiy that setBlockIndexCandidates is as expected when using a single,
+//! - First, verify that setBlockIndexCandidates is as expected when using a single,
 //!   fully-validating chainstate.
 //!
 //! - Then mark a region of the chain BLOCK_ASSUMED_VALID and introduce a second chainstate

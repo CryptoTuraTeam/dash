@@ -1,5 +1,5 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2020 The Bitcoin Core developers
+// Copyright (c) 2009-2021 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -34,12 +34,13 @@ enum BuriedDeployment : int16_t {
     DEPLOYMENT_V19,
     DEPLOYMENT_V20,
     DEPLOYMENT_MN_RR,
+    DEPLOYMENT_WITHDRAWALS,
 };
-constexpr bool ValidDeployment(BuriedDeployment dep) { return dep <= DEPLOYMENT_MN_RR; }
+constexpr bool ValidDeployment(BuriedDeployment dep) { return dep <= DEPLOYMENT_WITHDRAWALS; }
 
 enum DeploymentPos : uint16_t {
     DEPLOYMENT_TESTDUMMY,
-    DEPLOYMENT_WITHDRAWALS, // Deployment of Fix for quorum selection for withdrawals
+    DEPLOYMENT_V24,         // Deployment of doubling withdrawal limit, extended addresses
     // NOTE: Also add new deployments to VersionBitsDeploymentInfo in deploymentinfo.cpp
     MAX_VERSION_BITS_DEPLOYMENTS
 };
@@ -97,7 +98,6 @@ struct Params {
     uint256 hashDevnetGenesisBlock;
     int nSubsidyHalvingInterval;
     /** Block height at which BIP16 becomes active */
-    int BIP16Height;
     int nMasternodePaymentsStartBlock;
     int nMasternodePaymentsIncreaseBlock;
     int nMasternodePaymentsIncreasePeriod; // in blocks
@@ -147,6 +147,8 @@ struct Params {
     int V20Height;
     /** Block height at which MN_RR (Deployment of Masternode Reward Location Reallocation) becomes active */
     int MN_RRHeight;
+    /** Block height at which WITHDRAWALS (Deployment of quorum fix and higher limits for withdrawals) becomes active */
+    int WithdrawalsHeight;
     /** Don't warn about unknown BIP 9 activations below this height.
      * This prevents us from warning about the CSV and DIP activations. */
     int MinBIP9WarningHeight;
@@ -169,7 +171,9 @@ struct Params {
     int nPowKGWHeight;
     int nPowDGWHeight;
     int64_t DifficultyAdjustmentInterval() const { return nPowTargetTimespan / nPowTargetSpacing; }
+    /** The best chain should have at least this much work */
     uint256 nMinimumChainWork;
+    /** By default assume that the signatures in ancestors of this block are valid */
     uint256 defaultAssumeValid;
 
     /** these parameters are only used on devnet and can be configured from the outside */
@@ -214,6 +218,8 @@ struct Params {
             return V20Height;
         case DEPLOYMENT_MN_RR:
             return MN_RRHeight;
+        case DEPLOYMENT_WITHDRAWALS:
+            return WithdrawalsHeight;
         } // no default case, so the compiler can warn about missing cases
         return std::numeric_limits<int>::max();
     }
